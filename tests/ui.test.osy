@@ -1,0 +1,119 @@
+// The studio's fields as people use them — the owner defines a field and puts it on a kind of shoot on a condition, kept
+// only on Save; the team edits a booking's fields and what the studio keeps about its client in place, wide and on a
+// phone. `osy test --pixels` photographs each.
+
+using Osysharp.Identity;
+using Osysharp.CustomFields;
+using FieldsKitTests;
+
+Guid BookingOf(string title) { var id = Guid.Empty; runas (Sam) { id = Booking.Single(b => b.Title == title).Id; } return id; }
+
+[Test(Studio)]
+void the_owner_adds_a_field_and_puts_it_on_a_kind_of_shoot_kept_on_save() {
+  Ui.Viewport(1440, 900);
+  Ui.SignInAs(Olga);
+  Ui.Visit("/settings/fields");
+  Assert.Visible("Venue", within: "Booking fields");
+  Assert.Visible("Preferred time", within: "Client fields");
+  Ui.Click("Add a field to Booking fields");
+  Ui.Fill("Name", "Second shooter");
+  Ui.Select("Kind", FieldKind.YesNo);
+  Ui.Click("Ask the client when they book");
+  Ui.Shot("fields-add-wide");
+  Ui.Click("Add the field");
+  Assert.Visible("Second shooter", within: "Booking fields");
+  // …and put it on the wedding form, where it is asked from now on.
+  Ui.Click("Add a field to A wedding");
+  Ui.Click("Second shooter");
+  Assert.Visible("Second shooter", within: "Fields on A wedding");
+  Ui.Click("Save");
+  Assert.Visible("Fields saved.");
+  runas (Olga) {
+    var made = BookingField.Single(f => f.Name == "Second shooter");
+    Assert.Equal(FieldKind.YesNo, made.Kind);
+    Assert.True(made.Public);
+    Assert.True(FormField.Any(x => x.Field == made && x.Form.Name == "A wedding"));
+  }
+  Ui.Shot("fields-settings-wide");
+}
+
+[Test(Studio)]
+void a_condition_that_can_never_be_met_says_why() {
+  Ui.Viewport(1440, 900);
+  Ui.SignInAs(Olga);
+  Ui.Visit("/settings/fields");
+  Assert.Visible("Shown when For a business? is Yes", within: "Fields on A portrait");
+  // A field nobody answered says nothing about answers (an empty FirstOrDefault of a count is 0, not null).
+  Assert.Visible("One of a list · the team's", within: "Lens");
+  Assert.Hidden("answered on", within: "Lens");
+  Ui.Click("Move Company name up on A portrait");
+  Assert.Visible("Never shown: For a business? comes after it — move it above.", within: "Fields on A portrait");
+}
+
+[Test(Studio)]
+void a_name_another_field_of_the_kind_has_is_refused_as_it_is_typed() {
+  Ui.Viewport(1440, 900);
+  Ui.SignInAs(Olga);
+  Ui.Visit("/settings/fields");
+  Ui.Click("Add a field to Client fields");
+  Ui.Fill("Name", "preferred TIME");
+  Assert.Visible("Another field already has that name.");
+  Assert.Disabled("Add the field");
+}
+
+// The app's own method makes the field and answers it, and the dialog WAITS for it: a field the app refuses keeps the
+// dialog open with the app's words; the one it makes is marked "Added" on the list.
+[Test(Studio)]
+void a_field_the_app_refuses_keeps_the_dialog_open_with_its_reason_and_the_one_it_makes_is_marked_added() {
+  Ui.Viewport(1440, 900);
+  Ui.SignInAs(Olga);
+  Ui.Visit("/settings/fields");
+  Ui.Click("Add a field to Client fields");
+  Ui.Fill("Name", "Card number");
+  Ui.Click("Add the field");
+  Assert.Visible("The studio never keeps card details.");
+  Assert.Visible("A new field");
+  Ui.Fill("Name", "Favourite colour");
+  Ui.Click("Add the field");
+  Assert.Hidden("A new field");
+  Assert.Visible("Added", within: "Favourite colour");
+  Assert.Hidden("Added", within: "Preferred time");
+  Ui.Shot("fields-added");
+}
+
+[Test(Studio)]
+void the_team_edits_a_bookings_fields_and_its_clients_in_place() {
+  runas (Cleo) { BookShoot(ClientId("Cleo Martin"), "Our wedding", KindId("wedding"), [Said("Venue", "The old mill"), Said("Guests", "80")]); }
+  Ui.Viewport(1440, 900);
+  Ui.SignInAs(Sam);
+  Ui.Visit("/bookings/" + BookingOf("Our wedding"));
+  Assert.Visible("The old mill", within: "Booking");
+  Assert.Visible("Not answered", within: "About Cleo Martin");
+  Ui.Click("Edit Deposit paid");
+  Ui.Click("Yes", within: "Deposit paid");
+  Ui.Click("Save Deposit paid");
+  Assert.Visible("Yes", within: "Booking");
+  // A number that is not one is refused under the question, in words, and nothing is kept.
+  Ui.Click("Edit Guests");
+  Ui.Fill("Guests", "eighty");
+  Ui.Click("Save Guests");
+  Assert.Visible("Guests takes a number, like 42 or 3.5.");
+  Ui.Click("Cancel");
+  Ui.Click("Edit Preferred time");
+  Ui.Click("Weekend", within: "Preferred time");
+  Ui.Click("Save Preferred time");
+  Assert.Visible("Weekend", within: "About Cleo Martin");
+  Ui.Shot("fields-booking-wide");
+  runas (Sam) {
+    Assert.Equal("yes", BookingFieldValue.Single(v => v.Field.Name == "Deposit paid").Value);
+    Assert.Equal("80", BookingFieldValue.Single(v => v.Field.Name == "Guests").Value);
+    Assert.Equal("Weekend", ClientFieldValue.Single().Value);
+  }
+
+  Ui.Viewport(390, 844);
+  Ui.Visit("/bookings/" + BookingOf("Our wedding"));
+  Ui.Click("Edit Lens");
+  Assert.Visible("85mm", within: "Editing Lens");
+  Assert.NoOverflow();
+  Ui.Shot("fields-booking-phone");
+}

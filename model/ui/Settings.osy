@@ -1,0 +1,320 @@
+// DEFINING FIELDS AND FORMS — the sections an app puts on its settings page, one per kind of record: the fields (each
+// with its kind, options, hint and whether outside people are asked), and the forms that ask them, each field on a form
+// with the one condition it is shown on.
+//
+// ⚑ NOTHING HERE DELETES AN ANSWER. A field is RETIRED, never deleted: it stops being asked and edited, and every record
+//   keeps what it said, shown as retired. Taking a field off a form takes the question away, not the answers. A field's
+//   kind is fixed once saved — the page says so instead of offering a menu that would be refused.
+// ⚑ NOTHING IS SAVED UNTIL SAVE: the sections edit rows in the page's unit of work, and the app's settings page puts its
+//   one `SaveBar` under them.
+namespace Osysharp.CustomFields;
+
+using Osysharp.Ui;
+
+/// What a form-field's condition means today — "" when it can be met, else the sentence that says why it never will.
+/// `onForm`: every field on the same form.
+public string ConditionProblem(FormField x, List<FormField> onForm) {
+  if (x.ShowWhen == null) { return ""; }
+  var at = onForm.FirstOrDefault(o => o.Field.Id == x.ShowWhen.Id);
+  if (at == null) { return "Never shown: " + x.ShowWhen.Name + " is not on this form."; }
+  if (at.Position > x.Position || (at.Position == x.Position && onForm.IndexOf(at) > onForm.IndexOf(x))) {
+    return "Never shown: " + x.ShowWhen.Name + " comes after it — move it above.";
+  }
+  if (!x.ShowWhen.Active) { return "Never shown: " + x.ShowWhen.Name + " is retired."; }
+  if (x.ShowValue.Trim() == "") { return "Never shown: say which answer to " + x.ShowWhen.Name + " shows it."; }
+  if (AnswerProblem(SpecOf(x.ShowWhen), x.ShowValue) != "") {
+    return "Never shown: “" + x.ShowValue + "” is not an answer " + x.ShowWhen.Name + " takes.";
+  }
+  return "";
+}
+
+/// "Shown when Did you see an error? is Yes" — or "Always asked".
+public string ConditionLine(FormField x) {
+  if (x.ShowWhen == null) { return "Always asked"; }
+  return "Shown when " + x.ShowWhen.Name + " is " + (x.ShowValue == "" ? "…" : ShownAnswer(x.ShowWhen.Kind, Normalised(SpecOf(x.ShowWhen), x.ShowValue)));
+}
+
+/// "Text · asked on the form, required", "Yes or no · the team's" — a field's kind and who answers it, each line whole so
+/// it translates whole. `asks`: whether these fields can be asked at all (else the kind alone).
+public string KindLine(CustomField f, bool asks) {
+  var kind = f.Kind.Label;
+  if (!asks) { return kind; }
+  if (!f.Public) { return $"{kind} · the team's"; }
+  return f.Required ? $"{kind} · asked on the form, required" : $"{kind} · asked on the form";
+}
+
+/// "answered on 3 tickets" — "" for none.
+public string UseLine(List<FieldUse> used, Guid field, string record, string records) {
+  var n = used.Where(u => u.Field == field).Select(u => u.Count).FirstOrDefault();
+  return n == 0 ? "" : " · answered on " + n + " " + (n == 1 ? record : records);
+}
+
+/// THE FIELDS OF ONE KIND OF RECORD — each with its kind and who is asked, how many records answered it, moved up and
+/// down, edited in a dialog, retired and brought back. "Add a field" fills in a `FieldDraft` and hands it to `add`, the
+/// app's method that makes one of its own type and answers it
+/// (`CustomField AddCompanyField(FieldDraft d) => FillField(new CompanyField(), d, companyFields.Count);`) — kept, like
+/// every change here, on the page's Save. A field the app refuses (it throws) leaves the dialog open with the app's own
+/// words; the one it makes is marked "Added" on the list. `record`/`records`: the record in the app's words
+/// ("ticket", "tickets"). `publicLabel`: the checkbox that asks outside people ("Ask the customer on the help page") —
+/// none: these fields are always the team's. `nameHint`: what the name is used for, under its box.
+[Composable]
+public component FieldListSection(CustomField[] fields, Func<FieldDraft, CustomField> add, List<FieldUse> used,
+                                  string title = "Fields", string description = "", string record = "record",
+                                  string records = "records", string publicLabel = "", string nameHint = "",
+                                  string about = "Something the app asks about a record.") {
+  CustomField? open = null;
+  /// The "Add a field" dialog, and what it has filled in so far.
+  bool adding = false;
+  string newName = "";
+  FieldKind newKind = FieldKind.Text;
+  string newOptions = "";
+  string newHint = "";
+  bool newPublic = false;
+  bool newRequired = false;
+  /// What the app said when it refused the field — its own words, shown in the dialog, which stays open.
+  string addError = "";
+  /// The fields added during this visit — marked "Added" on the list.
+  List<Guid> added = new List<Guid>();
+
+  action StartAdding() {
+    adding = true; newName = ""; newKind = FieldKind.Text; newOptions = ""; newHint = ""; newPublic = false; newRequired = false;
+    addError = "";
+  }
+  action StopAdding() { adding = false; }
+  action Add() {
+    if (FieldNameProblem(newName, Guid.Empty, fields) != "" || (newKind == FieldKind.Choice && OptionsIn(newOptions).Count == 0)) { return; }
+    UnitOfWork.Mark("Add " + newName.Trim());
+    // The app's method makes the field and ANSWERS it — waited for, so a refusal it throws lands in this `catch`, and the
+    // dialog stays open saying why, instead of closing on a field that was never made.
+    try {
+      var made = add(new FieldDraft { Name = newName.Trim(), Kind = newKind, Options = newOptions, Hint = newHint,
+                                      Public = newPublic, Required = newPublic && newRequired });
+      added.Add(made.Id);
+      adding = false;
+    } catch (Exception ex) { addError = ex.Message; }
+  }
+  action EditField(CustomField f) { open = f; }
+  action Done() { open = null; }
+  action MoveField(CustomField f, int by) {
+    var ordered = fields.ToList();
+    var at = ordered.IndexOf(f);
+    var to = at + by;
+    if (at < 0 || to < 0 || to >= ordered.Count) { return; }
+    UnitOfWork.Mark("Move " + f.Name + (by < 0 ? " up" : " down"));
+    ordered.RemoveAt(at);
+    ordered.Insert(to, f);
+    for (var i = 0; i < ordered.Count; i++) { if (ordered[i].Position != i) { ordered[i].Position = i; } }
+  }
+  action Retire(CustomField f) { UnitOfWork.Mark("Retire " + f.Name); f.Active = false; }
+  action BringBack(CustomField f) { UnitOfWork.Mark("Bring back " + f.Name); f.Active = true; }
+
+  render {
+    SettingsSection(title, description: description != "" ? description
+                      : "Every question asked about a " + record + ", in the order it shows them. A field is retired, never deleted: " + records + " keep their answers.") {
+      Stack(gap: 0, role: UiRole.List, label: title) {
+        if (fields.Count == 0) {
+          Text("No fields yet. Add the first thing you want to know about a " + record + ".", color: Colors.TextMuted, fontSize: FontSize.Label);
+        }
+        foreach (var f in fields) {
+          Row(gap: 2, align: Align.Center, wrap: Layout.AtLeast(Tablet) ? Wrapping.NoWrap : Wrapping.Wrap, py: 2, borderBW: 1, border: Colors.Border, role: UiRole.ListItem, label: f.Name) {
+            Stack(gap: 0, grow: 1, minW: "0", w: Layout.AtLeast(Tablet) ? "auto" : "100%") {
+              Row(gap: 2, align: Align.Center) {
+                Text(f.Name, fontWeight: FontWeight.Medium, color: f.Active ? Colors.OnSurface : Colors.TextMuted);
+                if (!f.Active) { Badge("Retired", tone: Tone.Ghost); }
+                if (added.Contains(f.Id)) { Badge("Added", tone: Tone.Success); }
+              }
+              Text(KindLine(f, publicLabel != "") + UseLine(used, f.Id, record, records),
+                   fontSize: FontSize.Caption, color: Colors.TextMuted);
+            }
+            IconButton("Move " + f.Name + " up", () => MoveField(f, -1), size: Size.Sm, tone: Tone.Ghost, disabled: f.Id == fields.First().Id) { Icon(Icons.ChevronUp, size: 14); }
+            IconButton("Move " + f.Name + " down", () => MoveField(f, 1), size: Size.Sm, tone: Tone.Ghost, disabled: f.Id == fields.Last().Id) { Icon(Icons.ChevronDown, size: 14); }
+            Button("Edit", onPress: () => EditField(f), tone: Tone.Ghost, size: Size.Sm, announceAs: "Edit " + f.Name);
+            // One width for both words, so a retired row's buttons line up with everybody else's.
+            Row(w: "104px", justify: Layout.AtLeast(Tablet) ? Justify.End : Justify.Start) {
+              if (f.Active) { Button("Retire", onPress: () => Retire(f), tone: Tone.Ghost, size: Size.Sm, announceAs: "Retire " + f.Name); }
+              else { Button("Bring back", onPress: () => BringBack(f), tone: Tone.Ghost, size: Size.Sm, announceAs: "Bring back " + f.Name); }
+            }
+          }
+        }
+      }
+      Row { Button("Add a field", onPress: StartAdding, tone: Tone.Ghost, size: Size.Sm, announceAs: "Add a field to " + title); }
+    }
+    if (adding) {
+      Dialog("A new field", onDismiss: StopAdding, subtitle: about) {
+        Field("Name", value: newName, hint: nameHint, error: newName == "" ? "" : FieldNameProblem(newName, Guid.Empty, fields));
+        Stack(gap: 1) {
+          Dropdown("Kind", value: newKind);
+          Text("Fixed once saved: " + records + " keep their answers in it.", fontSize: FontSize.Caption, color: Colors.TextMuted);
+        }
+        if (newKind == FieldKind.Choice) { TextAreaField("Options, one per line", value: newOptions, rows: 4); }
+        Field("Hint", value: newHint, placeholder: "Where to find it — shown under the question");
+        if (publicLabel != "") {
+          Checkbox(publicLabel, value: newPublic);
+          if (newPublic) { Checkbox("They must answer it", value: newRequired); }
+        }
+        if (addError != "") { Text(addError, color: Colors.Danger, fontSize: FontSize.Label); }
+        Row(gap: 2, justify: Justify.End) {
+          Button("Cancel", onPress: StopAdding, tone: Tone.Ghost);
+          Button("Add the field", onPress: Add, tone: Tone.Primary,
+                 disabled: FieldNameProblem(newName, Guid.Empty, fields) != "" || (newKind == FieldKind.Choice && OptionsIn(newOptions).Count == 0));
+        }
+      }
+    }
+    if (open != null) {
+      Dialog(open.Name == "" ? "A field" : open.Name, onDismiss: Done, subtitle: about) {
+        Field("Name", value: open.Name, hint: nameHint, error: FieldNameProblem(open.Name, open.Id, fields));
+        Stack(gap: 1) {
+          FieldLabel("Kind");
+          Text(open.Kind.Label, fontWeight: FontWeight.Medium);
+          Text("Fixed once saved: " + records + " keep their answers in it. For another kind, retire this field and add a new one.",
+               fontSize: FontSize.Caption, color: Colors.TextMuted);
+        }
+        if (open.Kind == FieldKind.Choice) { TextAreaField("Options, one per line", value: open.Options, rows: 4); }
+        Field("Hint", value: open.Hint, placeholder: "Where to find it — shown under the question");
+        if (publicLabel != "") {
+          Checkbox(publicLabel, value: open.Public);
+          if (open.Public) { Checkbox("They must answer it", value: open.Required); }
+        }
+        Row(justify: Justify.End) { Button("Done", onPress: Done, tone: Tone.Primary, disabled: FieldNameProblem(open.Name, open.Id, fields) != ""); }
+      }
+    }
+  }
+}
+
+/// ONE FORM — its name, whether it is in use, what it is for, its key (chosen once: fixed when saved), whether it is the
+/// default, and the fields it asks, each moved, taken off, or shown on a condition. What the app adds to its own kind of
+/// form (a switch, a note) goes in the body (`{ … }`), under the key. `onForm`: this form's fields; `fields`: every
+/// field of the kind it asks; `fresh`: made on this page and never saved; `makeDefault`: make it the default (the app
+/// unsets the others).
+[Composable]
+public component FormSection(FieldForm form, List<FormField> onForm, CustomField[] fields, bool fresh, Action makeDefault,
+                             string description = "", string keyHint = "What rules name it by — lower-case words and hyphens. Fixed once saved.") {
+  /// The form-field whose condition is being edited.
+  Guid conditionOf = Guid.Empty;
+  bool adding = false;
+
+  action OpenAdding() { adding = !adding; }
+  action CloseAdding() { adding = false; }
+  action PutOn(CustomField field) {
+    adding = false;
+    UnitOfWork.Mark("Put " + field.Name + " on " + form.Name);
+    new FormField { Form = form, Field = field, Position = onForm.Count };
+  }
+  action TakeOff(FormField x) {
+    UnitOfWork.Mark("Take " + x.Field.Name + " off " + form.Name);
+    if (conditionOf == x.Id) { conditionOf = Guid.Empty; }
+    x.Delete();
+  }
+  action MoveOnForm(FormField x, int by) {
+    var ordered = onForm.ToList();
+    var at = -1;
+    for (var i = 0; i < ordered.Count; i++) { if (ordered[i].Id == x.Id) { at = i; } }
+    var to = at + by;
+    if (at < 0 || to < 0 || to >= ordered.Count) { return; }
+    UnitOfWork.Mark("Move " + x.Field.Name + (by < 0 ? " up" : " down"));
+    ordered.RemoveAt(at);
+    ordered.Insert(to, x);
+    for (var i = 0; i < ordered.Count; i++) { if (ordered[i].Position != i) { ordered[i].Position = i; } }
+  }
+  action EditCondition(FormField x) { conditionOf = conditionOf == x.Id ? Guid.Empty : x.Id; }
+  action Always(FormField x) {
+    UnitOfWork.Mark(x.Field.Name + " always asked");
+    x.ShowWhen = null;
+    x.ShowValue = "";
+    conditionOf = Guid.Empty;
+  }
+
+  render {
+    SettingsSection(form.Name, description: description) {
+      Row(gap: 3, align: Align.End, wrap: Wrapping.Wrap) {
+        Stack(grow: 1, minW: "180px") { Field("Name", value: form.Name); }
+        Switch("In use", value: form.Active);
+      }
+      Field("What it is for", value: form.Description, placeholder: "Shown under the choice on the form");
+      // The key is what rules name the form by: chosen once, fixed once saved (so a rename keeps every rule matching),
+      // the way a field's kind is.
+      if (fresh) {
+        // The form's own invariant is the guarantee at Save; said here as it is typed, from the same const.
+        Field("Key", value: form.Key, hint: keyHint,
+              error: Regex.IsMatch(form.Key, KeyShape) ? "" : "A key is lower-case words joined by hyphens, like bug-report.");
+      } else {
+        Text("Rules name it “" + form.Key + "”.", fontSize: FontSize.Caption, color: Colors.TextMuted);
+      }
+      Slot;
+      Row(gap: 2, align: Align.Center) {
+        if (form.IsDefault) { Text("Default — taken when nobody chooses", fontSize: FontSize.Caption, color: Colors.TextMuted); }
+        else { Button("Make it the default", onPress: makeDefault, tone: Tone.Ghost, size: Size.Sm, announceAs: "Make " + form.Name + " the default"); }
+      }
+      Stack(gap: 0, role: UiRole.List, label: "Fields on " + form.Name) {
+        if (onForm.Count == 0) {
+          Text("It asks nothing more yet.", fontSize: FontSize.Label, color: Colors.TextMuted);
+        }
+        foreach (var x in onForm) {
+          Stack(gap: 2, py: 2, borderBW: 1, border: Colors.Border, role: UiRole.ListItem, label: x.Field.Name + " on " + form.Name) {
+            Row(gap: 2, align: Align.Center, wrap: Layout.AtLeast(Tablet) ? Wrapping.NoWrap : Wrapping.Wrap) {
+              Stack(gap: 0, grow: 1, minW: "0", w: Layout.AtLeast(Tablet) ? "auto" : "100%") {
+                Row(gap: 2, align: Align.Center) {
+                  Text(x.Field.Name, fontWeight: FontWeight.Medium, color: x.Field.Active ? Colors.OnSurface : Colors.TextMuted);
+                  if (!x.Field.Active) { Badge("Retired", tone: Tone.Ghost); }
+                  if (!x.Field.Public) { Badge("Team", tone: Tone.Ghost); }
+                }
+                if (ConditionProblem(x, onForm) != "") {
+                  Text(ConditionProblem(x, onForm), fontSize: FontSize.Caption, color: Colors.Warning);
+                } else {
+                  Text(ConditionLine(x), fontSize: FontSize.Caption, color: Colors.TextMuted);
+                }
+              }
+              IconButton("Move " + x.Field.Name + " up on " + form.Name, () => MoveOnForm(x, -1), size: Size.Sm, tone: Tone.Ghost) { Icon(Icons.ChevronUp, size: 14); }
+              IconButton("Move " + x.Field.Name + " down on " + form.Name, () => MoveOnForm(x, 1), size: Size.Sm, tone: Tone.Ghost) { Icon(Icons.ChevronDown, size: 14); }
+              Button("Condition", onPress: () => EditCondition(x), tone: conditionOf == x.Id ? Tone.Primary : Tone.Ghost, size: Size.Sm,
+                     announceAs: "Condition of " + x.Field.Name + " on " + form.Name);
+              Button("Take off", onPress: () => TakeOff(x), tone: Tone.Ghost, size: Size.Sm, announceAs: "Take " + x.Field.Name + " off " + form.Name);
+            }
+            if (conditionOf == x.Id) {
+              ConditionEditor(x, onForm.Where(o => o.Id != x.Id && o.Position <= x.Position && o.Field.Active)
+                                .Select(o => o.Field).ToList(), () => Always(x));
+            }
+          }
+        }
+      }
+      Box(position: Position.Relative) {
+        Button("Add a field to " + form.Name, onPress: OpenAdding, tone: Tone.Ghost, size: Size.Sm);
+        if (adding) {
+          Backdrop(CloseAdding);
+          Menu(from: MenuFrom.BelowStart, label: "Fields to put on " + form.Name) {
+            if (!fields.Any(f => f.Active && !onForm.Any(o => o.Field.Id == f.Id))) {
+              MenuItem("Every field in use is on it", CloseAdding);
+            }
+            foreach (var f in fields.Where(f => f.Active && !onForm.Any(o => o.Field.Id == f.Id))) {
+              MenuItem(f.Name, () => PutOn(f));
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+/// A form-field's condition: which earlier question shows it, and on which answer — a menu of the answers when the
+/// question has a fixed set (a list, yes or no), a line otherwise.
+[Composable]
+public component ConditionEditor(FormField x, List<CustomField> earlier, Action always) {
+  render {
+    Stack(gap: 2, p: 3, rounded: Radius.Md, bg: Colors.Sunken, animation: KitArrive, label: "Condition of " + x.Field.Name) {
+      if (earlier.Count == 0) {
+        Text("Only a question above it on this form can show it. Move it below the question that should.", fontSize: FontSize.Caption, color: Colors.TextMuted);
+      } else {
+        Row(gap: 3, align: Align.End, wrap: Wrapping.Wrap) {
+          Stack(minW: "200px") {
+            Dropdown("Show it only when", value: x.ShowWhen, options: earlier.ToArray(), placeholder: "Always asked") { f => Text(f.Name); }
+          }
+        }
+        if (x.ShowWhen != null) {
+          // The answer that shows it, in the control the question itself is answered with.
+          Question(SpecOf(x.ShowWhen), value: x.ShowValue, optional: false, label: "…and its answer is");
+        }
+      }
+      if (x.ShowWhen != null) { Row { Button("Always ask it", onPress: always, tone: Tone.Ghost, size: Size.Sm); } }
+    }
+  }
+}

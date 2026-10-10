@@ -1,0 +1,112 @@
+namespace FieldsKitTests;
+
+using Osysharp.Identity;
+using Osysharp.CustomFields;
+using Osysharp.Ui;
+
+/// THE STUDIO'S BOOKINGS — each one a link to its page.
+[Route("/")] [Authorize(IsStaff)] [Render(CSR)] [Title("Bookings")]
+component Bookings() {
+  live var bookings = Booking.Include(b => b.Client).OrderBy(b => b.Title).ToList();
+  render {
+    Stack(gap: 3, p: 5, maxW: "720px") {
+      PageTitle("Bookings");
+      if (bookings.Count == 0) { Text("No bookings yet.", color: Colors.TextMuted); }
+      foreach (var b in bookings) { Link("/bookings/" + b.Id) { Text(b.Title + " — " + b.Client.Name); } }
+    }
+  }
+}
+
+/// The studio's one settings page, in the settings area's own nav.
+public class StudioSettings : ISettingsProvider {
+  public SettingsLink[] Sections() {
+    return [
+      new SettingsLink { Label = "Fields", To = "/settings/fields", Group = "Studio", Icon = Icons.Tag, Order = 10,
+                         Shown = ManagesFields, Hint = "What the studio asks when a client books, and keeps about each client." },
+    ];
+  }
+}
+
+/// THE STUDIO'S FIELDS — what a booking asks, the kinds of shoot that ask it, and what the studio keeps about a client.
+[Route("/settings/fields")] [Layout(SettingsFrame)] [Authorize(ManagesFields)] [Render(CSR)] [Title("Fields")]
+component FieldsSettings() {
+  live var bookingFields = BookingField.OrderBy(f => f.Position).ThenBy(f => f.Name).ToList();
+  live var clientFields = ClientField.OrderBy(f => f.Position).ThenBy(f => f.Name).ToList();
+  live var kinds = ShootKind.OrderBy(k => k.Position).ThenBy(k => k.Name).ToList();
+  live var onForms = FormField.Include(x => x.Form).Include(x => x.Field).Include(x => x.ShowWhen).OrderBy(x => x.Position).ToList();
+  live var bookingUse = BookingFieldValue.Where(v => v.Value != "").GroupBy(v => v.Field.Id)
+    .Select(g => new FieldUse { Field = g.Key, Count = g.Count() }).ToList();
+  live var clientUse = ClientFieldValue.Where(v => v.Value != "").GroupBy(v => v.Field.Id)
+    .Select(g => new FieldUse { Field = g.Key, Count = g.Count() }).ToList();
+  Guid freshKind = Guid.Empty;
+
+  action AddKind() {
+    UnitOfWork.Mark("Add a kind of shoot");
+    var made = new ShootKind { Name = "New kind", Key = FreeKey("new-kind", kinds.Select(k => k.Key).ToList()),
+                               Position = kinds.Count, IsDefault = kinds.Count == 0 };
+    freshKind = made.Id;
+  }
+  CustomField AddBookingField(FieldDraft d) => FillField(new BookingField(), d, bookingFields.Count);
+  // The studio's own rule, which the kit's dialog does not know: a client field may not ask for a card number. Thrown,
+  // so the kit's "Add a field" dialog shows it and stays open.
+  CustomField AddClientField(FieldDraft d) {
+    if (d.Name.ToLower().Contains("card")) { throw new ValidationException("The studio never keeps card details."); }
+    return FillField(new ClientField(), d, clientFields.Count);
+  }
+  action MakeDefault(ShootKind kind) {
+    UnitOfWork.Mark("Make " + kind.Name + " the default");
+    foreach (var k in kinds) { k.IsDefault = k.Id == kind.Id; }
+  }
+
+  render {
+    SettingsPage("Fields", description: "What the studio asks when a client books, and what it keeps about each client.") {
+      FieldListSection(bookingFields, AddBookingField, bookingUse, title: "Booking fields",
+                       record: "booking", records: "bookings", publicLabel: "Ask the client when they book",
+                       about: "Something the studio asks about a booking.");
+      foreach (var k in kinds) {
+        FormSection(k, onForms.Where(x => x.Form.Id == k.Id).ToList(), bookingFields,
+                    freshKind == k.Id, () => MakeDefault(k), description: "A kind of shoot a client chooses when they book.") {
+          NumberField("Hours set aside", value: k.Hours, min: 1);
+        }
+      }
+      Row { Button("Add a kind of shoot", onPress: AddKind, tone: Tone.Ghost, size: Size.Sm); }
+      FieldListSection(clientFields, AddClientField, clientUse, title: "Client fields",
+                       record: "client", records: "clients", about: "Something the studio keeps about a client — never shown to them.");
+      SaveBar(onSave: () => { freshKind = Guid.Empty; }, saved: "Fields saved.");
+    }
+  }
+}
+
+/// ONE BOOKING, as the team works it: its fields and its client's, each edited in place.
+[Route("/bookings/{id}")] [Authorize(IsStaff)] [Render(CSR)] [Title("Booking")]
+component BookingPage(Guid id) {
+  live var bookings = Booking.Where(b => b.Id == id).Include(b => b.Client).ToList();
+  live var bookingFields = BookingField.OrderBy(f => f.Position).ThenBy(f => f.Name)
+    .Select(f => new FieldSpec { Id = f.Id, Name = f.Name, Kind = f.Kind, Options = f.Options, Hint = f.Hint,
+                                 Public = f.Public, Required = f.Required, Active = f.Active, Position = f.Position }).ToList();
+  live var clientFields = ClientField.OrderBy(f => f.Position).ThenBy(f => f.Name)
+    .Select(f => new FieldSpec { Id = f.Id, Name = f.Name, Kind = f.Kind, Options = f.Options, Hint = f.Hint,
+                                 Public = f.Public, Required = f.Required, Active = f.Active, Position = f.Position }).ToList();
+  live var held = BookingFieldValue.Where(v => v.Booking.Id == id)
+    .Select(v => new FieldAnswer { Field = v.Field.Id, Value = v.Value }).ToList();
+  live var clientId = bookings.Count > 0 ? bookings[0].Client.Id : Guid.Empty;
+  live var clientHeld = ClientFieldValue.Where(v => v.Client.Id == clientId)
+    .Select(v => new FieldAnswer { Field = v.Field.Id, Value = v.Value }).ToList();
+  live var owner = IsOwner;
+
+
+  render {
+    Stack(gap: 5, p: 5, maxW: "720px") {
+      if (bookings.Count > 0) {
+        PageTitle(bookings[0].Title);
+        Text(bookings[0].Client.Name, color: Colors.TextMuted);
+        Row(gap: 5, wrap: Wrapping.Wrap, align: Align.Start, w: "100%") {
+          Box(grow: 1, basis: "280px", minW: "0") { Card() { RecordFields(id, bookingFields, held, title: "Booking", definer: owner,
+                       whereMade: "Settings › Fields"); } }
+          Box(grow: 1, basis: "280px", minW: "0") { Card() { RecordFields(clientId, clientFields, clientHeld, title: "About " + bookings[0].Client.Name,
+                       definer: owner, whereMade: "Settings › Fields"); } }
+        }
+      }
+    }
+  }
+}

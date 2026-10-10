@@ -1,0 +1,154 @@
+namespace FieldsKitTests;
+
+using Osysharp.Identity;
+using Osysharp.CustomFields;
+using Osysharp.Ui;
+
+// A photography studio. Its team (staff) works the bookings; its owner decides what the studio asks; a client books a
+// shoot, answers the booking form's questions, and reads back what they told the studio — never the team's notes, and
+// never what the studio keeps about them.
+
+[Role] enum StudioRole { Authenticator, Staff, Owner }
+
+policy IsStaff => RoleGrant.Any(g => g.Member == user && (g.Role == StudioRole.Staff || g.Role == StudioRole.Owner));
+policy IsOwner => RoleGrant.Any(g => g.Member == user && g.Role == StudioRole.Owner);
+/// The kit's one question: the owner decides what the studio asks.
+policy ManagesFields => IsOwner;
+
+/// The studio's own kind of account — signs in with a code, which is all a test needs.
+entity Person : Principal {
+  [MaxLength(200)] string CodeHash = "";
+  security {
+    allow read when IsAuthenticated || IsAuthenticator;
+    allow create when IsAuthenticator;
+    allow update when IsAuthenticated || IsAuthenticator where Id == user.Id;
+    allow update when IsAuthenticator;
+    deny read CodeHash when !IsAuthenticator;
+  }
+}
+
+/// Somebody who books — with an account when they book online.
+entity Client {
+  [Required("Name the client."), MaxLength(120)] string Name;
+  Person? Account;
+  security {
+    allow read, create, update when IsStaff;
+    allow read when IsAuthenticated where Account == user;
+  }
+}
+
+/// A kind of shoot — the form a booking is made on.
+entity ShootKind : FieldForm {
+  /// How long the studio sets aside for one.
+  int Hours = 2;
+  security {
+    allow read when IsAuthenticated;
+    allow create, update when ManagesFields;
+  }
+}
+
+/// A booked shoot.
+entity Booking {
+  [Required("Say who the booking is for.")] Client Client;
+  [Required("Say what the shoot is."), MaxLength(200)] string Title;
+  ShootKind? Kind;
+  security {
+    allow read, create, update when IsStaff;
+    allow read, create when IsAuthenticated where Client.Account == user;
+  }
+}
+
+// ── the fields of a booking: asked of the client on its form, or the team's own ──────────────────────────────────
+
+/// A booking's fields have names of their own — a client's may share one.
+[Unique(Name, "Another booking field already has that name.")]
+entity BookingField : CustomField {
+  security {
+    allow read when IsAuthenticated;
+    allow create, update when ManagesFields;
+  }
+}
+
+/// The client fills a form when they book, so they read which fields are on it.
+partial entity FormField { security { allow read when IsAuthenticated; } }
+
+/// A booking's answer to one field — its security is the booking's.
+// SECURITY-INVARIANT(fields-a-value-is-its-records): a value is read and written by whoever the RECORD'S rules allow,
+// through the reference the app declared — so an outside person answers only what they are asked (a public, active
+// field) and only on a record of their own, and never reads the team's own fields. Guarded by tests/fields.test.osy.
+// One answer per field per booking — among bookings' answers (a `[Unique]` on a derived type is per type).
+[Unique(Booking, Field, "That booking already has an answer to that field.")]
+entity BookingFieldValue : FieldValue {
+  [Required] Booking Booking;
+  security {
+    allow read, create, update when IsStaff;
+    allow read when IsAuthenticated where Field.Public && Booking.Client.Account == user;
+    allow create when IsAuthenticated where Field.Public && Field.Active && Booking.Client.Account == user;
+  }
+}
+
+// ── what the studio keeps about a client: never shown to them ────────────────────────────────────────────────────
+
+[Unique(Name, "Another client field already has that name.")]
+entity ClientField : CustomField {
+  security {
+    allow read when IsStaff;
+    allow create, update when ManagesFields;
+  }
+}
+
+[Unique(Client, Field, "That client already has an answer to that field.")]
+entity ClientFieldValue : FieldValue {
+  [Required] Client Client;
+  security { allow read, create, update when IsStaff; }
+}
+
+// ── what the pages and a client call ─────────────────────────────────────────────────────────────────────────────
+
+/// A client books a shoot on the form of its kind, answering its questions — checked again here, trusting nothing the
+/// page sent. Answers the booking's id.
+public Guid BookShoot(Guid clientId, string title, Guid? kindId, List<FieldAnswer> answers) {
+  var client = Client.Single(c => c.Id == clientId);
+  ShootKind? kind = null;
+  if (kindId != null) {
+    kind = ShootKind.FirstOrDefault(k => k.Id == kindId.Value);
+    if (kind == null || !kind.Active) { throw new ValidationException("That kind of shoot is no longer offered."); }
+  }
+  var kept = Checked(kind, answers, true);
+  var booking = new Booking { Client = client, Title = title, Kind = kind };
+  var ids = kept.Select(a => a.Field).ToList();
+  foreach (var f in BookingField.Where(x => ids.Contains(x.Id)).ToList()) {
+    new BookingFieldValue { Booking = booking, Field = f, Value = AnswerTo(kept, f.Id) };
+  }
+  UnitOfWork.Commit();
+  return booking.Id;
+}
+
+/// How the studio keeps a booking's answers — the kit's editor writes through it.
+public class BookingFields : IFieldRecords {
+  public bool Holds(CustomField field) => field is BookingField;
+  public FieldValue? AnswerOf(Guid record, CustomField field) =>
+    BookingFieldValue.FirstOrDefault(v => v.Booking.Id == record && v.Field == field);
+  public FieldValue NewAnswer(Guid record, CustomField field) =>
+    new BookingFieldValue { Booking = Booking.Single(b => b.Id == record), Field = field };
+  public string LastChangedBy(Guid record) => "Someone";
+  public void Changed(Guid record, CustomField field, string before, string after) { }
+}
+
+/// How the studio keeps what it knows about a client — which reference an answer carries, and nothing else.
+public class ClientFields : RecordFields<ClientField, ClientFieldValue, Client> {
+  public ClientFields() : base(v => v.Client, c => new ClientFieldValue { Client = c }) { }
+}
+
+/// Sign in with an address and a code.
+[AuthMethod]
+string SignInWithCode(string email, string code) {
+  var p = Person.FirstOrDefault(x => x.Email == NormalisedEmail(email));
+  if (p == null || !p.IsActive) { Security.VerifyPassword(code); return ""; }
+  if (!Security.VerifyPassword(code, p.CodeHash)) { return ""; }
+  return Security.IssueJwt(p.Id, p.Email);
+}
+
+app.AuthBootstrap = new AuthBootstrap { Role = StudioRole.Authenticator, Login = SignInWithCode };
+app.Auth = new PasswordAuth { LoginField = Email, PasswordField = CodeHash };
+app.Audit = new AuditConfig { Redact = new AuditRedaction { Properties = [FieldsKitTests.Person.CodeHash] } };

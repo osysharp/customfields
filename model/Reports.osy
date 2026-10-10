@@ -1,0 +1,36 @@
+namespace Osysharp.CustomFields;
+
+using Osysharp.Explore;
+
+// FIELDS IN REPORTS — a record's custom fields as COLUMNS of it in a report builder: from a ticket, "Customer › Their
+// plan" groups, filters and shows like any field the app declares. An answer is a ROW (one per record and field); this
+// says which rows those are and how each kind of field reads, and the report compiler reads them as columns
+// (`ExplorePivot`).
+//
+// ⚑ THE APP DECLARES THE RELATION BACK — `[ForeignKey(Guest)] GuestFieldValue[] Fields;` on the record — and keeps one
+//   answer per record and field (`[Unique(Guest, Field)]`). A collection with both is read as columns; one without the
+//   unique rule is not, because "the record's answer" would not be one answer.
+// ⚑ FOUND WITHOUT BEING LISTED: a report builder asks every `IExplorePivots` in the app, so an app on this kit and on a
+//   report builder gets its custom fields in reports by declaring the relation, and nothing else.
+
+/// A record's custom fields as columns of it: one per field its answers name, by the field's name — a number read as a
+/// number (summed, averaged), a date as a date (by day, week or month), a list as its options, yes or no as Yes and No.
+public class FieldsInReports : IExplorePivots {
+  public List<ExplorePivot> Pivots() {
+    return [new ExplorePivot {
+      Element = Explore.Root<FieldValue>(),
+      Key = Explore.Path<FieldValue>(v => v.Field),
+      Value = Explore.Path<FieldValue>(v => v.Value),
+      Label = Explore.Path<CustomField>(f => f.Name),
+      Kind = Explore.Path<CustomField>(f => f.Kind),
+      Choices = Explore.Path<CustomField>(f => f.Options),
+      Kinds = [
+        new ExplorePivotKind { Is = "Number", Reads = Osysharp.Explore.FieldKind.Number },
+        new ExplorePivotKind { Is = "Date", Reads = Osysharp.Explore.FieldKind.Date },
+        new ExplorePivotKind { Is = "Choice", Reads = Osysharp.Explore.FieldKind.Choice },
+        new ExplorePivotKind { Is = "YesNo", Reads = Osysharp.Explore.FieldKind.Choice, Choices = ["yes", "no"],
+                               ChoiceLabels = [Translate("Yes"), Translate("No")] },
+      ],
+    }];
+  }
+}

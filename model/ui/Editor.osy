@@ -1,0 +1,183 @@
+// FIELDS ON SCREEN — one question as a form asks it, a record's fields as the team reads and edits them, and what a form
+// keeps while a person fills it. The rules are Fields.osy's; these only draw them.
+namespace Osysharp.CustomFields;
+
+using Osysharp.Ui;
+
+/// ONE QUESTION, in the control its kind wants: a line for text and numbers, the native date picker for a date (it
+/// writes the "2026-10-02" a date is kept as), a menu of the options for a long choice, buttons for a short one and for
+/// Yes/No. The answer is bound text — the caller's own list element, so the question writes straight into it.
+/// `optional`: the field may be left empty (says so in the box); `error`: what was wrong with the last attempt, under it.
+[Composable]
+public component Question(FieldSpec f, Binding<string> value, bool optional = true, string error = "", Action onEnter = null,
+                          string label = "") {
+  render {
+    Stack(gap: 1) {
+      if (f.Kind == FieldKind.YesNo || (f.Kind == FieldKind.Choice && OptionsIn(f.Options).Count <= MaxChips)) {
+        Choices(label != "" ? label : f.Name, value: value, options: f.Kind == FieldKind.YesNo ? ["yes", "no"] : OptionsIn(f.Options), optional: optional);
+      } else if (f.Kind == FieldKind.Choice) {
+        // A long list is a menu. ⚠ Its trigger is empty for an answer not given yet: the Dropdown shows its placeholder
+        //   for null, and a text answer starts as "".
+        Dropdown(label != "" ? label : f.Name, value: value, options: OptionsIn(f.Options).ToArray(), placeholder: optional ? "Optional — choose one" : "Choose one") { o => Text(o); }
+      } else if (f.Kind == FieldKind.Date) {
+        Field(label != "" ? label : f.Name, value: value, type: "date", hint: f.Hint, error: error, onEnter: onEnter);
+      } else {
+        Field(label != "" ? label : f.Name, value: value, placeholder: f.Kind == FieldKind.Number ? (optional ? "Optional — a number" : "A number") : (optional ? "Optional" : ""),
+              hint: f.Hint, error: error, onEnter: onEnter);
+      }
+      // A menu says its hint and its error under it, as a line does under its box.
+      if (f.Kind == FieldKind.Choice || f.Kind == FieldKind.YesNo) {
+        if (error != "") { Text(error, fontSize: FontSize.Caption, color: Colors.Danger); }
+        else if (f.Hint != "") { Text(f.Hint, fontSize: FontSize.Caption, color: Colors.TextMuted); }
+      }
+    }
+  }
+}
+
+/// The most options drawn as buttons; a longer list is a menu.
+public const int MaxChips = 8;
+
+/// ONE OF A FEW, as buttons a person presses once — yes or no, a short list. Pressing the chosen one again takes the
+/// answer back (`optional`), so an answer given by mistake is never stuck. A radio group to a screen reader and a test:
+/// `Ui.Click("Yes", within: "Did you see an error?")`.
+[Composable]
+public component Choices(string label, Binding<string> value, List<string> options, bool optional = true) {
+  action Pick(string o) { value = SameAnswer(value, o) && optional ? "" : o; }
+  render {
+    Stack(gap: 1) {
+      // The caption a kit field draws above its box — the same size and weight, so a form reads as one column — and,
+      // like the boxes' "Optional", a word saying it may be left.
+      Row(gap: 2, align: Align.Baseline) {
+        Text(label, fontSize: FontSize.Label, fontWeight: FontWeight.Medium, color: Colors.TextMuted);
+        if (optional) { Text("Optional", fontSize: FontSize.Caption, color: Colors.TextMuted); }
+      }
+      Row(gap: 2, wrap: Wrapping.Wrap, role: UiRole.RadioGroup, label: label) {
+        foreach (var o in options) {
+          Pressable(onClick: () => Pick(o), role: UiRole.Radio, checked: SameAnswer(value, o), label: ShownAnswer(FieldKind.YesNo, o),
+                    h: Length.ControlSm, px: 3, rounded: Radius.Pill, borderW: 1, fontSize: FontSize.Label, transition: Motion.Fast,
+                    border: SameAnswer(value, o) ? Colors.Primary : Colors.Border,
+                    bg: SameAnswer(value, o) ? Colors.Primary.Subtle : Colors.Surface,
+                    color: SameAnswer(value, o) ? Colors.Primary : Colors.OnSurface,
+                    fontWeight: SameAnswer(value, o) ? FontWeight.Semibold : FontWeight.Regular) {
+            Text(ShownAnswer(FieldKind.YesNo, o));
+          }
+        }
+      }
+    }
+  }
+}
+
+// ── on a record ──────────────────────────────────────────────────────────────────────────────────────────────────────
+
+/// A field's name over its answer — "Not answered" when there is none; a retired field says so.
+[Composable]
+public component FieldAnswerLines(FieldSpec f, string value) {
+  render {
+    Stack(gap: 0, minW: "0", align: Align.Start) {
+      Row(gap: 2, align: Align.Center) {
+        Text(f.Name, fontSize: FontSize.Caption, color: Colors.TextMuted);
+        if (!f.Active) { Badge("Retired", tone: Tone.Ghost); }
+      }
+      if (value == "") { Text("Not answered", fontSize: FontSize.Label, color: Colors.TextMuted); }
+      else { Text(ShownAnswer(f.Kind, value), fontSize: FontSize.Label); }
+    }
+  }
+}
+
+/// ONE FIELD ON A RECORD — its name over its answer; pressing it edits it in the control its kind wants, and Save writes
+/// it (`SetField`, with the answer the page showed, so a colleague's change in between is refused by name). A retired
+/// field shows its answer and is not pressable; so does every field when `readOnly`.
+[Composable]
+public component FieldRow(Guid record, FieldSpec f, string value, bool readOnly = false) {
+  bool editing = false;
+  string draft = "";
+  string problem = "";
+  action Edit() { editing = true; draft = value; problem = ""; }
+  action Cancel() { editing = false; problem = ""; }
+  action Save() {
+    problem = AnswerProblem(f, draft);
+    if (problem != "") { return; }
+    try { SetField(record, f.Id, draft, value); editing = false; }
+    catch (Exception ex) { problem = ex.Message; }
+  }
+  render {
+    if (editing) {
+      Stack(gap: 2, p: 2, mx: "-8px", rounded: Radius.Md, bg: Colors.Sunken, animation: KitArrive, label: "Editing " + f.Name) {
+        Question(f, value: draft, optional: true, error: problem, onEnter: Save);
+        Row(gap: 1, justify: Justify.End) {
+          Button("Cancel", onPress: Cancel, tone: Tone.Ghost, size: Size.Sm);
+          Button("Save", onPress: Save, tone: Tone.Primary, size: Size.Sm, announceAs: "Save " + f.Name);
+        }
+      }
+    } else if (f.Active && !readOnly) {
+      Pressable(onClick: Edit, label: "Edit " + f.Name, px: 2, py: 1, mx: "-8px", rounded: Radius.Md, transition: Motion.Fast) {
+        FieldAnswerLines(f, value);
+      }
+    } else {
+      Box(px: 2, py: 1, mx: "-8px") { FieldAnswerLines(f, value); }
+    }
+  }
+}
+
+/// A RECORD'S FIELDS — every field in use, in order, each edited in place (`FieldRow`), then any retired field `record`
+/// still holds an answer to, so nothing it was told drops out of sight. A record type with no fields yet shows nothing —
+/// except to whoever defines them (`definer`), who is told where they are made (`whereMade`).
+[Composable]
+public component RecordFields(Guid record, List<FieldSpec> fields, List<FieldAnswer> held,
+                              string title = "Fields", bool definer = false, string whereMade = "", bool readOnly = false) {
+  render {
+    if (fields.Count > 0 || definer) {
+      Stack(gap: 2, role: UiRole.Region, label: title) {
+        SectionLabel(title);
+        if (fields.Count == 0) {
+          Text(whereMade != "" ? "No fields yet — they are added on " + whereMade + "." : "No fields yet.",
+               fontSize: FontSize.Caption, color: Colors.TextMuted);
+        }
+        foreach (var f in fields) {
+          if (f.Active || AnswerTo(held, f.Id) != "") { FieldRow(record, f, AnswerTo(held, f.Id), readOnly: readOnly); }
+        }
+      }
+    }
+  }
+}
+
+// ── on a form a person fills ─────────────────────────────────────────────────────────────────────────────────────────
+
+/// One place per field a form asks, in the order they come — what a page's answers are kept by, so choosing another
+/// form keeps an answer to a question both ask.
+public List<Guid> SlotsOf(List<FieldSpec> asked) {
+  var slots = new List<Guid>();
+  foreach (var x in asked) { if (!slots.Contains(x.Id)) { slots.Add(x.Id); } }
+  return slots;
+}
+
+/// `values` with an empty answer in every place up to `count` — the ones already given kept.
+public List<string> Padded(List<string> values, int count) {
+  var next = values.ToList();
+  while (next.Count < count) { next.Add(""); }
+  return next;
+}
+
+/// The answer kept in `field`'s place, or "".
+public string InSlot(List<Guid> slots, List<string> values, Guid field) {
+  var at = slots.IndexOf(field);
+  return at >= 0 && at < values.Count ? values[at] : "";
+}
+
+/// What a form's questions send: each field on it with its answer (an empty answer is no answer).
+public List<FieldAnswer> AnswersBySlot(List<FieldSpec> onForm, List<Guid> slots, List<string> values) {
+  return onForm.Select(x => new FieldAnswer { Field = x.Id, Value = InSlot(slots, values, x.Id) }).ToList();
+}
+
+/// What is wrong with the answer to `x`, as the form shows it under the question once somebody tried to send it.
+public string SlotProblem(FieldSpec x, List<Guid> slots, List<string> values, bool outside) {
+  var v = InSlot(slots, values, x.Id);
+  if (v.Trim() == "") { return outside && x.Required ? "Needs an answer." : ""; }
+  return AnswerProblem(x, v);
+}
+
+/// Whether an outside person may choose `form` — it is in use and asks them something. (A form that asks them nothing is
+/// the team's way of sorting records, not a choice for them.) `forms.Where(f => IsChoosable(f, asked))`.
+public bool IsChoosable(FieldForm form, List<FieldSpec> asked) {
+  return form.Active && asked.Any(x => x.Form == form.Id && x.Public && x.Active);
+}

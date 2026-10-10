@@ -1,0 +1,249 @@
+// A studio's fields in use — what a client is asked when they book, by the kind of shoot and its conditions; the server
+// checking every answer again; the team editing a booking's fields and what the studio keeps about a client; and every
+// answer held to its kind on every write, by whoever writes it.
+// SECURITY-INVARIANT(fields-a-value-is-its-records).
+
+using Osysharp.Identity;
+using Osysharp.CustomFields;
+using FieldsKitTests;
+
+[TestFixture]
+void Studio() {
+  var olga = new Person { Email = "olga@studio.test", DisplayName = "Olga", CodeHash = Security.HashPassword("1111") };
+  new RoleGrant { Member = olga, Role = StudioRole.Owner };
+  var sam = new Person { Email = "sam@studio.test", DisplayName = "Sam", CodeHash = Security.HashPassword("2222") };
+  new RoleGrant { Member = sam, Role = StudioRole.Staff };
+  var cleoAccount = new Person { Email = "cleo@example.com", DisplayName = "Cleo", CodeHash = Security.HashPassword("3333") };
+  var danAccount = new Person { Email = "dan@example.com", DisplayName = "Dan", CodeHash = Security.HashPassword("4444") };
+  new Client { Name = "Cleo Martin", Account = cleoAccount };
+  new Client { Name = "Dan Okafor", Account = danAccount };
+
+  var venue = new BookingField { Name = "Venue", Public = true, Required = true, Position = 0, Hint = "Where the ceremony is." };
+  var guests = new BookingField { Name = "Guests", Kind = FieldKind.Number, Public = true, Position = 1 };
+  var business = new BookingField { Name = "For a business?", Kind = FieldKind.YesNo, Public = true, Position = 2 };
+  var company = new BookingField { Name = "Company name", Public = true, Required = true, Position = 3 };
+  var shootOn = new BookingField { Name = "Shoot on", Kind = FieldKind.Date, Public = true, Position = 4 };
+  new BookingField { Name = "Deposit paid", Kind = FieldKind.YesNo, Position = 5 };
+  new BookingField { Name = "Lens", Kind = FieldKind.Choice, Options = "35mm\n50mm\n85mm", Position = 6 };
+
+  var wedding = new ShootKind { Name = "A wedding", Key = "wedding", IsDefault = true, Position = 0, Hours = 8 };
+  new FormField { Form = wedding, Field = venue, Position = 0 };
+  new FormField { Form = wedding, Field = guests, Position = 1 };
+  new FormField { Form = wedding, Field = shootOn, Position = 2 };
+  var portrait = new ShootKind { Name = "A portrait", Key = "portrait", Position = 1 };
+  new FormField { Form = portrait, Field = business, Position = 0 };
+  new FormField { Form = portrait, Field = company, Position = 1, ShowWhen = business, ShowValue = "yes" };
+
+  new ClientField { Name = "Preferred time", Kind = FieldKind.Choice, Options = "Weekday\nWeekend\nAny day", Position = 0 };
+  new ClientField { Name = "Returning client", Kind = FieldKind.YesNo, Position = 1 };
+}
+
+principal Olga => Person.Single(p => p.Email == "olga@studio.test");
+principal Sam => Person.Single(p => p.Email == "sam@studio.test");
+principal Cleo => Person.Single(p => p.Email == "cleo@example.com");
+principal Dan => Person.Single(p => p.Email == "dan@example.com");
+
+Guid FieldId(string name) { var id = Guid.Empty; runas (Sam) { id = BookingField.Single(f => f.Name == name).Id; } return id; }
+Guid KindId(string key) { var id = Guid.Empty; runas (Sam) { id = ShootKind.Single(k => k.Key == key).Id; } return id; }
+Guid ClientId(string name) { var id = Guid.Empty; runas (Sam) { id = Client.Single(c => c.Name == name).Id; } return id; }
+FieldAnswer Said(string field, string value) => new FieldAnswer { Field = FieldId(field), Value = value };
+
+// ── the rule, both sides ────────────────────────────────────────────────────────────────────────────────────────
+
+[Test(Studio)]
+void a_question_on_a_condition_shows_only_once_the_earlier_answer_says_so() {
+  runas (Cleo) {
+    var portrait = FormSpecs().Where(x => x.Form == KindId("portrait")).ToList();
+    Assert.Equal(1, ShownFields(portrait, new List<FieldAnswer>(), true).Count);
+    Assert.Equal(1, ShownFields(portrait, [Said("For a business?", "no")], true).Count);
+    Assert.Equal(2, ShownFields(portrait, [Said("For a business?", "Yes")], true).Count);
+  }
+}
+
+[Test(Studio)]
+void every_kind_says_what_is_wrong_in_words_and_keeps_one_spelling() {
+  var guests = new FieldSpec { Name = "Guests", Kind = FieldKind.Number };
+  Assert.Equal("Guests takes a number, like 42 or 3.5.", AnswerProblem(guests, "forty"));
+  Assert.Equal("", AnswerProblem(guests, " 120 "));
+  Assert.Equal("120", Normalised(guests, " 120 "));
+  var on = new FieldSpec { Name = "Shoot on", Kind = FieldKind.Date };
+  Assert.Equal("Shoot on takes a date, like 2026-10-02.", AnswerProblem(on, "2026-02-30"));
+  Assert.Equal("2028-02-29", Normalised(on, "2028-02-29"));
+  Assert.Equal("29 Feb 2028", ShownAnswer(FieldKind.Date, "2028-02-29"));
+  var lens = new FieldSpec { Name = "Lens", Kind = FieldKind.Choice, Options = "35mm\n50mm\n85mm" };
+  Assert.Equal("Lens is one of: 35mm, 50mm, 85mm.", AnswerProblem(lens, "24mm"));
+  Assert.Equal("85mm", Normalised(lens, "85MM"));
+  var yes = new FieldSpec { Name = "Deposit paid", Kind = FieldKind.YesNo };
+  Assert.Equal("Deposit paid is yes or no.", AnswerProblem(yes, "maybe"));
+  Assert.Equal("yes", Normalised(yes, "Yes"));
+  Assert.Equal("order-number", FieldWord(" Order Number "));
+  // A field nobody answered says nothing about answers — an empty FirstOrDefault of a count is 0, not null.
+  Assert.Equal("", UseLine(new List<FieldUse>(), Guid.NewGuid(), "booking", "bookings"));
+  Assert.Equal(" · answered on 2 bookings", UseLine([new FieldUse { Field = Guid.Empty, Count = 2 }], Guid.Empty, "booking", "bookings"));
+}
+
+// ── asking: a booking's answers, checked on the server ───────────────────────────────────────────────────────────
+
+[Test(Studio)]
+void a_client_books_and_the_server_keeps_only_what_the_form_asks_them() {
+  runas (Cleo) {
+    var cleo = ClientId("Cleo Martin");
+    // A required question left empty is refused, naming it — and every problem is said at once.
+    var refused = Assert.Throws<ValidationException>(() => BookShoot(cleo, "Our wedding", KindId("wedding"), [Said("Guests", "lots")]));
+    Assert.Contains("Venue needs an answer.", refused.Message);
+    Assert.Contains("Guests takes a number", refused.Message);
+    // A team-only field is not the client's to answer, whatever the page sent.
+    Assert.Throws<ValidationException>(() => BookShoot(cleo, "Our wedding", KindId("wedding"), [Said("Venue", "The old mill"), Said("Deposit paid", "yes")]));
+    // A field from another form is refused too.
+    Assert.Throws<ValidationException>(() => BookShoot(cleo, "Our wedding", KindId("wedding"), [Said("Venue", "The old mill"), Said("For a business?", "no")]));
+    var id = BookShoot(cleo, "Our wedding", KindId("wedding"), [Said("Venue", " The old mill "), Said("Guests", "80"), Said("Shoot on", "2027-06-12")]);
+    Assert.Equal(3, BookingFieldValue.Count(v => v.Booking.Id == id));
+    Assert.Equal("The old mill", BookingFieldValue.Single(v => v.Booking.Id == id && v.Field.Name == "Venue").Value);
+  }
+  // A condition's hidden answer is dropped, not kept.
+  runas (Cleo) {
+    var id = BookShoot(ClientId("Cleo Martin"), "Headshots", KindId("portrait"), [Said("For a business?", "no"), Said("Company name", "Martin & Co")]);
+    Assert.Equal(1, BookingFieldValue.Count(v => v.Booking.Id == id));
+  }
+}
+
+[Test(Studio)]
+void a_client_answers_only_what_they_are_asked_on_their_own_booking_and_never_reads_the_teams_fields() {
+  var cleoBooking = Guid.Empty;
+  runas (Cleo) { cleoBooking = BookShoot(ClientId("Cleo Martin"), "Our wedding", KindId("wedding"), [Said("Venue", "The old mill")]); }
+  runas (Sam) { SetField(cleoBooking, FieldId("Deposit paid"), "yes"); }
+  // Cleo reads what she was asked — not the team's note on her own booking.
+  runas (Cleo) {
+    Assert.Equal(1, BookingFieldValue.Count());
+    Assert.Equal("Venue", BookingFieldValue.Single().Field.Name);
+  }
+  // A row written straight past the form: a team-only field, and another client's booking, are both refused.
+  runas (Cleo) {
+    var mine = Booking.Single(b => b.Id == cleoBooking);
+    var deposit = BookingField.Single(f => f.Name == "Deposit paid");
+    var guests = BookingField.Single(f => f.Name == "Guests");
+    Assert.Denied(() => { new BookingFieldValue { Booking = mine, Field = deposit, Value = "no" }; UnitOfWork.Commit(); });
+    // …while a question she IS asked may be answered on her own booking, straight or not.
+    new BookingFieldValue { Booking = mine, Field = guests, Value = "60" };
+    UnitOfWork.Commit();
+  }
+  runas (Dan) {
+    var booking = Booking.FirstOrDefault(b => b.Id == cleoBooking);
+    Assert.Null(booking);
+    Assert.Equal(0, BookingFieldValue.Count());
+  }
+}
+
+[Test(Studio)]
+void an_answer_is_its_fields_kind_whoever_writes_the_row() {
+  runas (Sam) {
+    var booking = new Booking { Client = Client.Single(c => c.Name == "Dan Okafor"), Title = "Portraits" };
+    UnitOfWork.Commit();
+    var guests = BookingField.Single(f => f.Name == "Guests");
+    var lens = BookingField.Single(f => f.Name == "Lens");
+    var on = BookingField.Single(f => f.Name == "Shoot on");
+    var deposit = BookingField.Single(f => f.Name == "Deposit paid");
+    Assert.Throws<ValidationException>(() => { new BookingFieldValue { Booking = booking, Field = guests, Value = "many" }; UnitOfWork.Commit(); });
+    Assert.Throws<ValidationException>(() => { new BookingFieldValue { Booking = booking, Field = lens, Value = "24mm" }; UnitOfWork.Commit(); });
+    Assert.Throws<ValidationException>(() => { new BookingFieldValue { Booking = booking, Field = on, Value = "12 June" }; UnitOfWork.Commit(); });
+    Assert.Throws<ValidationException>(() => { new BookingFieldValue { Booking = booking, Field = deposit, Value = "Yes" }; UnitOfWork.Commit(); });
+    new BookingFieldValue { Booking = booking, Field = lens, Value = "50mm" };
+    UnitOfWork.Commit();
+    // …and one answer per field per booking.
+    Assert.Throws<ValidationException>(() => { new BookingFieldValue { Booking = booking, Field = lens, Value = "85mm" }; UnitOfWork.Commit(); });
+  }
+}
+
+// ── on a record: the team's edits ───────────────────────────────────────────────────────────────────────────────
+
+[Test(Studio)]
+void the_team_edits_a_bookings_field_and_a_colleagues_change_in_between_is_refused() {
+  var booking = Guid.Empty;
+  runas (Cleo) { booking = BookShoot(ClientId("Cleo Martin"), "Our wedding", KindId("wedding"), [Say("Venue", "The old mill")]); }
+  runas (Sam) {
+    SetField(booking, FieldId("Lens"), "85mm", "");
+    Assert.Equal("85mm", BookingFieldValue.Single(v => v.Booking.Id == booking && v.Field.Name == "Lens").Value);
+    // Olga's page still showed no lens: Sam changed it since, so her save is refused, saying what it is now.
+    var refused = Assert.Throws<ValidationException>(() => SetField(booking, FieldId("Lens"), "35mm", ""));
+    Assert.Contains("changed Lens to 85mm just now", refused.Message);
+    // Clearing it keeps the row, empty.
+    SetField(booking, FieldId("Lens"), "", "85mm");
+    Assert.Equal("", BookingFieldValue.Single(v => v.Booking.Id == booking && v.Field.Name == "Lens").Value);
+    Assert.Throws<ValidationException>(() => SetField(booking, FieldId("Guests"), "a hundred", null));
+  }
+}
+
+FieldAnswer Say(string field, string value) => Said(field, value);
+
+[Test(Studio)]
+void a_retired_field_keeps_every_answer_and_takes_no_new_one() {
+  var booking = Guid.Empty;
+  runas (Cleo) { booking = BookShoot(ClientId("Cleo Martin"), "Our wedding", KindId("wedding"), [Said("Venue", "The old mill"), Said("Guests", "80")]); }
+  runas (Olga) {
+    BookingField.Single(f => f.Name == "Guests").Active = false;
+    UnitOfWork.Commit();
+  }
+  runas (Sam) {
+    Assert.Equal("80", BookingFieldValue.Single(v => v.Booking.Id == booking && v.Field.Name == "Guests").Value);
+    var refused = Assert.Throws<ValidationException>(() => SetField(booking, FieldId("Guests"), "90", "80"));
+    Assert.Contains("Guests is retired", refused.Message);
+  }
+  // …and the form stops asking it.
+  runas (Cleo) {
+    Assert.Throws<ValidationException>(() => BookShoot(ClientId("Cleo Martin"), "Again", KindId("wedding"), [Said("Venue", "Here"), Said("Guests", "10")]));
+  }
+}
+
+[Test(Studio)]
+void what_the_studio_keeps_about_a_client_is_the_teams_and_never_the_clients() {
+  runas (Sam) {
+    var cleo = ClientId("Cleo Martin");
+    var preferred = ClientField.Single(f => f.Name == "Preferred time");
+    SetField(cleo, preferred.Id, "weekend");
+    Assert.Equal("Weekend", ClientFieldValue.Single(v => v.Client.Id == cleo).Value);
+    Assert.Throws<ValidationException>(() => SetField(cleo, preferred.Id, "Holidays"));
+  }
+  runas (Cleo) {
+    Assert.Equal(0, ClientFieldValue.Count());
+    Assert.Equal(0, ClientField.Count());
+  }
+}
+
+[Test(Studio)]
+void only_whoever_defines_fields_adds_or_changes_one() {
+  runas (Sam) {
+    Assert.Denied(() => { new BookingField { Name = "Music" }; UnitOfWork.Commit(); });
+  }
+  runas (Olga) {
+    var made = FillField(new ClientField(), new FieldDraft { Name = " Allergies ", Kind = FieldKind.Text, Public = true, Required = true }, 2);
+    UnitOfWork.Commit();
+    var kept = ClientField.Single(f => f.Name == "Allergies");
+    Assert.Equal(2, kept.Position);
+    Assert.True(kept.Public);
+    // Two fields of one kind never share a name, in any case — a booking's may share a client's.
+    Assert.Equal("Another field already has that name.", FieldNameProblem("allergies", Guid.Empty, ClientField.ToList().ToArray()));
+    Assert.Equal("", FieldNameProblem("Allergies", Guid.Empty, BookingField.ToList().ToArray()));
+    // A field's kind is fixed once saved.
+    Assert.Throws<ValidationException>(() => { kept.Kind = FieldKind.Number; UnitOfWork.Commit(); });
+    // A list needs its options.
+    Assert.Throws<ValidationException>(() => { new ClientField { Name = "Pets", Kind = FieldKind.Choice }; UnitOfWork.Commit(); });
+  }
+}
+
+[Test(Studio)]
+void a_field_on_no_kind_of_record_the_app_keeps_is_refused_by_name() {
+  runas (Olga) {
+    // A field of the kit's base type is on no record kind the app declared an IFieldRecords for.
+    var stray = new CustomField { Name = "Stray" };
+    UnitOfWork.Commit();
+    var refused = Assert.Throws<ValidationException>(() => SetField(ClientId("Cleo Martin"), stray.Id, "x"));
+    Assert.Contains("Stray is on no kind of record", refused.Message);
+  }
+}
+
+[Test(Studio)]
+void a_right_code_signs_in_and_a_wrong_one_or_an_unknown_address_does_not() {
+  Assert.NotEqual("", SignInWithCode("sam@studio.test", "2222"));
+  Assert.Equal("", SignInWithCode("sam@studio.test", "9999"));
+  Assert.Equal("", SignInWithCode("nobody@studio.test", "2222"));
+}

@@ -1,0 +1,485 @@
+namespace Osysharp.CustomFields;
+
+// CUSTOM FIELDS — what an app's admins add to a record beyond the columns the app declares: an order number on a request,
+// the industry of a company, the dietary needs of a guest. A field is a ROW (`CustomField`), so adding one is a settings
+// change, not a release; an answer is a row too (`FieldValue`), kept as the text its kind writes.
+//
+// ⚑ THE APP SAYS WHICH RECORDS HAVE FIELDS, BY TYPE. It derives a field type and a value type per record:
+//       entity GuestField : CustomField { security { … } }
+//       entity GuestFieldValue : FieldValue { [Required] Guest Guest; security { … } }
+//   so a value's security IS its record's — "a guest reads the answers on their own booking" is one hop through the FK
+//   the app declared — and the kit never keys anything by a record id it cannot see behind.
+//
+// ⚑ ONE RULE, BOTH SIDES. Which questions a form shows (`ShownFields`), what is wrong with an answer (`AnswerProblem`)
+//   and how it is kept (`Normalised`) are pure functions over `FieldSpec`, so a page asks them as a person types and the
+//   server asks the SAME ones before anything is kept (`Checked`, `CheckedChange`), trusting nothing the browser said.
+
+/// Who defines fields and forms. Only the app knows, so the app DEFINES it (a missing definition is a compile error
+/// naming it): `policy ManagesFields => IsAdmin;`.
+policy ManagesFields;
+
+/// The shapes an answer is kept in, by kind — read by the answer's invariants (below) and by `AnswerProblem`, so the
+/// rule and the words that explain it cannot drift apart.
+public const string NumberShape = "^-?[0-9]+([.][0-9]+)?$";
+public const string DayShape = "^[0-9]{4}-[0-9]{2}-[0-9]{2}$";
+/// A form's key: lower-case words joined by hyphens.
+public const string KeyShape = "^[a-z0-9]+(-[a-z0-9]+)*$";
+
+// ⚠ Appended, never inserted: an enum is stored by position.
+/// What a field takes.
+public enum FieldKind {
+  [Label("Text")] Text,
+  [Label("Number")] Number,
+  [Label("Yes or no")] YesNo,
+  [Label("One of a list")] Choice,
+  [Label("Date")] Date,
+}
+
+/// A thing the app asks about a record beyond its own columns — the BASE an app derives one field type from per kind of
+/// record (`entity TicketField : CustomField`), so a ticket's fields and a company's are told apart by their type.
+///
+/// ⚑ RETIRED, NEVER DELETED. A field records have answered is history: retiring it (`Active` false) stops it being asked
+///   or edited, and every record keeps its answer, shown as retired. The kit grants no delete.
+/// ⚑ ITS KIND IS FIXED ONCE SAVED (`[Immutable]`): an answer is kept as the text its kind writes ("2026-10-02", "yes",
+///   "3.5"), so turning a Number into a Date would make every kept answer a lie. A different kind is a new field.
+/// ⚑ THE APP STATES WHO READS ITS FIELDS — the people who fill a form need to read its questions — so it is
+///   `Extensible`; an app's subtype states its own grants (they are never inherited), and a field is read under its
+///   own type's grants whatever it is reached through — `FormField.Field`, a read of `CustomField` — never the base's.
+/// ⚑ ITS NAME IS ONE OF A KIND — the app says so on its type, `[Unique(Name, "…")]`, which holds among that type's
+///   own rows (a guest field and a company field may share a name). `FieldNameProblem` says it as a name is typed.
+[Authority(Extensible)]
+public entity CustomField {
+  [Required("Name the field."), MaxLength(60)] string Name;
+  [Immutable] FieldKind Kind = FieldKind.Text;
+  /// For `Choice`: the options, one per line. Taking one away keeps the answers that chose it.
+  [MaxLength(1000)] string Options = "";
+  /// Where to find the answer — shown under the question.
+  [MaxLength(200)] string Hint = "";
+  /// The people OUTSIDE the team — the customer, the guest, the applicant — see it and answer it on a form; otherwise
+  /// it is the team's.
+  bool Public = false;
+  /// An outside person must answer it whenever a form shows it to them. (The team is never stopped by it.)
+  bool Required = false;
+  int Position = 0;
+  bool Active = true;
+  invariant Options.Trim() != "" when Kind == FieldKind.Choice message "A list needs its options, one per line.";
+  security {
+    allow read, create, update when ManagesFields;
+    // A PUBLIC field in use is a question asked of anybody who fills a form, signed in or not. This grant covers a
+    // field of the kit's own type; an app's field type is read under the grants it states.
+    allow read when IsAuthenticated || IsAnonymous where Public && Active;
+  }
+}
+
+/// A FORM — a type of request, a kind of booking — and the fields it asks: the BASE an app derives its own from
+/// (`entity TicketForm : FieldForm { bool AsksRootCause; }`), or uses as-is.
+// ⚑ ONE KEY SPACE FOR EVERY FORM: the key is what rules name a form by, and an app's forms of two kinds share the table.
+[Authority(Extensible)]
+[SuppressWarning("UNIQUE_SPANS_HIERARCHY")]
+public entity FieldForm {
+  [Required("Name the form."), MaxLength(60)] string Name;
+  [MaxLength(200)] string Description = "";
+  /// The word rules name the form by ("bug-report"). Fixed once saved (`[Immutable]`), like a field's kind: renaming the
+  /// form must not quietly stop every rule matching it.
+  [Required("Give the form a key."), Unique("Another form already has that key."), MaxLength(60), Immutable]
+  string Key;
+  /// The form a record takes when nobody chose one.
+  bool IsDefault = false;
+  int Position = 0;
+  bool Active = true;
+  invariant Regex.IsMatch(Key, KeyShape) message "A key is lower-case words joined by hyphens, like bug-report.";
+  security { allow read, create, update when ManagesFields; }
+}
+
+/// One field on one form — and, optionally, the one condition it is shown on: "show it when <ShowWhen> is <ShowValue>"
+/// ("Correlation id" when "Did you see an error?" is yes). The condition's field must come EARLIER on the form; one that
+/// is not on it, or is retired, can never be answered, so the field it guards is never shown (`ConditionProblem` says so).
+///
+/// ⚑ THE APP STATES WHO READS ITS FORMS — `partial entity FormField { security { allow read when IsAnonymous; } }` for a
+///   form a signed-out visitor fills.
+[Unique(Form, Field, "That field is already on the form.")]
+[Authority(Extensible)]
+public entity FormField {
+  [Required] FieldForm Form;
+  [Required] CustomField Field;
+  int Position = 0;
+  CustomField? ShowWhen;
+  [MaxLength(200)] string ShowValue = "";
+  security { allow read, create, update, delete when ManagesFields; }
+}
+
+/// One record's answer to one field, as the text its kind writes (`Normalised`): a choice's own option, "yes" or "no", a
+/// number, a date as "2026-10-02". Empty: answered once and since cleared. The BASE an app derives one value type from
+/// per kind of record, carrying the reference to it:
+///
+///     [Unique(Ticket, Field), PersonalData(TicketAnswers, OnErasure.DeleteRow)]
+///     entity TicketFieldValue : FieldValue { [Required, DataSubject] Ticket Ticket; security { … } }
+///
+/// ⚑ THE APP STATES ITS SECURITY, and it is the record's: grants are written over that reference, never here.
+/// ⚑ AN ANSWER IS THE KIND ITS FIELD SAYS, ON EVERY WRITE. These rules read the field through the answer's `[Required]`
+///   reference, so they hold for a form, an edit, an import — and an outside person writing a row directly, which no
+///   function sees. `AnswerProblem` checks the same shapes first, from the same consts, in words; these are the guarantee.
+/// ⚑ AN ANSWER CAN BE ABOUT A PERSON, so it is classified personal. A value is kept by its record's app, so the app's
+///   subtype says which category it is held under and whose it is (`[PersonalData]` + `[DataSubject]`); the value is
+///   inherited, so an erasure that should take it says `OnErasure.DeleteRow`.
+[Authority(Extensible)]
+public entity FieldValue {
+  [Required] CustomField Field;
+  [Classification(Personal.Content), MaxLength(1000)] string Value = "";
+  invariant Value == "" || Regex.IsMatch(Value, NumberShape) when Field.Kind == FieldKind.Number
+    message "That answer is not a number, like 42 or 3.5.";
+  invariant Value == "" || Value == "yes" || Value == "no" when Field.Kind == FieldKind.YesNo
+    message "That answer is not yes or no.";
+  invariant Value == "" || Regex.IsMatch(Value, DayShape) when Field.Kind == FieldKind.Date
+    message "That answer is not a date written like 2026-10-02.";
+  invariant Value == "" || Field.Options.Split("\n").Any(o => o.Trim() == Value) when Field.Kind == FieldKind.Choice
+    message "That answer is not one of the field's options.";
+  security { allow read when ManagesFields; }
+}
+
+// ── what a page and the server read ─────────────────────────────────────────────────────────────────────────────────
+
+/// One answer to one field — what a form sends, and what a record holds.
+public class FieldAnswer {
+  public Guid Field;
+  public string Value = "";
+}
+
+/// One change a person made to one record's field: the answer they wrote, and the answer the page showed them ("" for
+/// none) — so a colleague's change in between is caught, by name.
+public class FieldChange {
+  public Guid Field;
+  public string Value = "";
+  public string Expected = "";
+}
+
+/// How many records hold an answer to a field — what the settings page says next to it.
+public class FieldUse {
+  public Guid Field;
+  public int Count;
+}
+
+/// A field as a form asks it — the field's own facts, and where it sits on the form with its condition. A page reads
+/// these as ONE projection (`FormSpecs`, or its own `Select`), so it holds every fact it draws, and the rules read the
+/// same shape on both sides.
+public class FieldSpec {
+  public Guid Id;
+  public string Name = "";
+  public FieldKind Kind;
+  public string Options = "";
+  public string Hint = "";
+  public bool Public;
+  public bool Required;
+  public bool Active = true;
+  /// The form it is on (none: the field on its own, as a record shows it), its place there, and its condition.
+  public Guid? Form;
+  public int Position;
+  public Guid? ShowWhen;
+  public string ShowValue = "";
+}
+
+/// A field on its own, as a record shows and edits it.
+public FieldSpec SpecOf(CustomField f) {
+  return new FieldSpec { Id = f.Id, Name = f.Name, Kind = f.Kind, Options = f.Options, Hint = f.Hint,
+                         Public = f.Public, Required = f.Required, Active = f.Active, Position = f.Position };
+}
+
+/// Every field on every form, in each form's order — ONE read, for a page or the server.
+[SuppressWarning("cost-unbounded-read")]   // every field on every form — the app's form configuration, read once for a page
+public List<FieldSpec> FormSpecs() {
+  return FormField.OrderBy(x => x.Position).ThenBy(x => x.Field.Position)
+    .Select(x => new FieldSpec { Id = x.Field.Id, Name = x.Field.Name, Kind = x.Field.Kind, Options = x.Field.Options,
+                                 Hint = x.Field.Hint, Public = x.Field.Public, Required = x.Field.Required,
+                                 Active = x.Field.Active, Form = x.Form.Id, Position = x.Position,
+                                 ShowWhen = x.ShowWhen.Id, ShowValue = x.ShowValue })
+    .ToList();
+}
+
+// ── the rule, both sides ─────────────────────────────────────────────────────────────────────────────────────────────
+
+/// The options of a choice, one per line.
+public List<string> OptionsIn(string options) {
+  return options.Split("\n").Select(o => o.Trim()).Where(o => o != "").ToList();
+}
+
+/// Two answers that mean the same — "Mail" and "mail ".
+public bool SameAnswer(string a, string b) => a.Trim().ToLower() == b.Trim().ToLower();
+
+/// The answer given to `field`, or "".
+public string AnswerTo(List<FieldAnswer> answers, Guid field) {
+  foreach (var a in answers) { if (a.Field == field) { return a.Value; } }
+  return "";
+}
+
+/// The fields of a form that show, in its order, given the answers so far. A field with a condition shows only when the
+/// field it names is itself shown (so: earlier on the form) AND answered with the condition's value — so a condition on
+/// a later field, on a field not on the form, on a retired field or (for an outside person) on a team-only field never
+/// shows what it guards. A retired field is never asked. `outside`: only what an outside person is asked.
+public List<Guid> ShownFields(List<FieldSpec> onForm, List<FieldAnswer> answers, bool outside) {
+  var shown = new List<Guid>();
+  foreach (var x in onForm) {
+    if (!x.Active) { continue; }
+    if (outside && !x.Public) { continue; }
+    if (x.ShowWhen != null) {
+      if (!shown.Contains(x.ShowWhen.Value)) { continue; }
+      if (!SameAnswer(AnswerTo(answers, x.ShowWhen.Value), x.ShowValue)) { continue; }
+    }
+    shown.Add(x.Id);
+  }
+  return shown;
+}
+
+/// A day written "2026-10-02", or none when it is not one.
+public DateOnly? DayOf(string written) {
+  var v = written.Trim();
+  if (v.Length != 10 || v.Substring(4, 1) != "-" || v.Substring(7, 1) != "-") { return null; }
+  // One statement per part, so each `out var` is read only after the statement that assigns it.
+  if (!int.TryParse(v.Substring(0, 4), out var year)) { return null; }
+  if (!int.TryParse(v.Substring(5, 2), out var month)) { return null; }
+  if (!int.TryParse(v.Substring(8, 2), out var day)) { return null; }
+  if (year < 1 || month < 1 || month > 12 || day < 1) { return null; }
+  var days = month == 2 ? ((year % 4 == 0 && year % 100 != 0) || year % 400 == 0 ? 29 : 28)
+    : (month == 4 || month == 6 || month == 9 || month == 11 ? 30 : 31);
+  if (day > days) { return null; }
+  return new DateOnly(year, month, day);
+}
+
+/// What is wrong with `value` as an answer to `f`, in a sentence that names the field — "" when nothing is. An empty
+/// answer is not wrong here; whether one is allowed is the form's question (`Checked`).
+public string AnswerProblem(FieldSpec f, string value) {
+  var v = value.Trim();
+  if (v == "") { return ""; }
+  if (v.Length > 1000) { return f.Name + " is too long — keep it under 1,000 characters."; }
+  if (f.Kind == FieldKind.Number && !Regex.IsMatch(v, NumberShape)) { return f.Name + " takes a number, like 42 or 3.5."; }
+  if (f.Kind == FieldKind.Date && DayOf(v) == null) { return f.Name + " takes a date, like 2026-10-02."; }
+  if (f.Kind == FieldKind.YesNo && !SameAnswer(v, "yes") && !SameAnswer(v, "no")) { return f.Name + " is yes or no."; }
+  if (f.Kind == FieldKind.Choice && !OptionsIn(f.Options).Any(o => SameAnswer(o, v))) {
+    return f.Name + " is one of: " + string.Join(", ", OptionsIn(f.Options)) + ".";
+  }
+  return "";
+}
+
+/// An answer as it is kept: a choice's own option, "yes"/"no", a number or a text as written (trimmed), a day as
+/// "2026-10-02". Call it on an answer `AnswerProblem` passed.
+public string Normalised(FieldSpec f, string value) {
+  var v = value.Trim();
+  if (v == "") { return ""; }
+  if (f.Kind == FieldKind.Choice) {
+    foreach (var o in OptionsIn(f.Options)) { if (SameAnswer(o, v)) { return o; } }
+  }
+  if (f.Kind == FieldKind.YesNo) { return v.ToLower(); }
+  if (f.Kind == FieldKind.Date) {
+    var d = DayOf(v);
+    if (d != null) { return d.Value.ToString("yyyy-MM-dd"); }
+  }
+  return v;
+}
+
+/// An answer as a person reads it — "Yes", "2 Oct 2026", the option; "" for none.
+public string ShownAnswer(FieldKind kind, string value) {
+  if (value == "") { return ""; }
+  if (kind == FieldKind.YesNo) { return SameAnswer(value, "yes") ? "Yes" : (SameAnswer(value, "no") ? "No" : value); }
+  if (kind == FieldKind.Date) {
+    var d = DayOf(value);
+    if (d != null) { return d.Value.ToString("d MMM yyyy"); }
+  }
+  return value;
+}
+
+/// An answer for a history line: as a person reads it, and never longer than a line.
+public string Quoted(FieldKind kind, string value) {
+  var shown = ShownAnswer(kind, value);
+  return shown.Length > 120 ? shown.Substring(0, 117) + "…" : shown;
+}
+
+/// A field's name as a filter writes it — "Order number" → "order-number".
+public string FieldWord(string name) => name.Trim().ToLower().Replace(" ", "-");
+
+// ── asking: a form's answers, checked on the server ──────────────────────────────────────────────────────────────────
+
+/// The answers a form keeps, checked: every answer is to a field this form asks this person (refused otherwise —
+/// nothing the browser sends is taken on trust), an answer the form's conditions hide is dropped, a required question
+/// left empty is refused naming it, and every answer must be one its kind accepts. All problems are said at once.
+/// `form` none: a record that asks nothing beyond its own columns. `outside`: an outside person's own form (only what
+/// they are asked, and the required ones enforced).
+public List<FieldAnswer> Checked(FieldForm? form, List<FieldAnswer> given, bool outside) {
+  var said = given.Where(a => a.Value.Trim() != "").ToList();
+  if (form == null) {
+    if (said.Count > 0) { throw new ValidationException("This form asks nothing more. Reload the page and send it again."); }
+    return new List<FieldAnswer>();
+  }
+  var formId = form.Id;
+  var onForm = FormSpecs().Where(x => x.Form == formId).ToList();
+  foreach (var a in said) {
+    if (!onForm.Any(x => x.Id == a.Field && x.Active && (!outside || x.Public))) {
+      throw new ValidationException("The form “" + form.Name + "” does not ask that any more. Reload the page and send it again.");
+    }
+  }
+  var shown = ShownFields(onForm, given, outside);
+  var problems = new List<string>();
+  var kept = new List<FieldAnswer>();
+  foreach (var x in onForm) {
+    if (!shown.Contains(x.Id)) { continue; }
+    var v = AnswerTo(given, x.Id).Trim();
+    if (v == "") {
+      if (outside && x.Required) { problems.Add(x.Name + " needs an answer."); }
+      continue;
+    }
+    var problem = AnswerProblem(x, v);
+    if (problem != "") { problems.Add(problem); continue; }
+    kept.Add(new FieldAnswer { Field = x.Id, Value = Normalised(x, v) });
+  }
+  if (problems.Count > 0) { throw new ValidationException(string.Join(" ", problems)); }
+  return kept;
+}
+
+/// One change to one record's field, checked before the app writes it: the field still takes answers, the answer is
+/// one its kind accepts, and nobody changed it since the page showed `expected` (null: do not check) — that one is
+/// refused naming `lastChangedBy`, so two people never overwrite each other without knowing. Answers the answer as it
+/// is kept; the same as `before` means there is nothing to write.
+public string CheckedChange(CustomField field, string before, string value, string? expected, string lastChangedBy = "Someone") {
+  var f = SpecOf(field);
+  if (!f.Active) {
+    throw new ValidationException(f.Name + " is retired: records keep their answers to it, and it takes no new ones.");
+  }
+  var problem = AnswerProblem(f, value);
+  if (problem != "") { throw new ValidationException(problem); }
+  if (expected != null && before != expected) {
+    throw new ValidationException((lastChangedBy == "" ? "Someone" : lastChangedBy) + " changed " + f.Name + " to "
+      + (before == "" ? "nothing" : Quoted(f.Kind, before)) + " just now. Have another look.");
+  }
+  return Normalised(f, value);
+}
+
+// ── writing a record's answers ──────────────────────────────────────────────────────────────────────────────────────
+
+/// HOW THE APP KEEPS ONE KIND OF RECORD'S ANSWERS — one class per kind of record, found without being listed
+/// (`App.Implementations<IFieldRecords>()`), so the kit's editor writes an answer to any record the app keeps fields on.
+/// Most records need nothing but which reference an answer carries, and say it with `RecordFields` (below):
+///
+///     public class GuestFields : RecordFields<GuestField, GuestFieldValue, Guest> {
+///       public GuestFields() : base(v => v.Guest, g => new GuestFieldValue { Guest = g }) { }
+///     }
+///
+/// A record that writes a history line or tells an automation when an answer changes implements the contract itself:
+///
+///     public class GuestFields : IFieldRecords {
+///       public bool Holds(CustomField field) => field is GuestField;
+///       public FieldValue? AnswerOf(Guid record, CustomField field) =>
+///         GuestFieldValue.FirstOrDefault(v => v.Guest.Id == record && v.Field == field);
+///       public FieldValue NewAnswer(Guid record, CustomField field) =>
+///         new GuestFieldValue { Guest = Guest.Single(g => g.Id == record), Field = field };
+///       public string LastChangedBy(Guid record) => "Someone";
+///       public void Changed(Guid record, CustomField field, string before, string after) { }
+///     }
+///
+/// ⚑ EVERY READ AND WRITE HERE IS THE CALLER'S, under the app's own rules on its value type — the kit grants nothing.
+public interface IFieldRecords {
+  /// Is `field` one of this kind of record's — `field is GuestField`.
+  bool Holds(CustomField field);
+  /// The answer `record` holds to `field`, or null.
+  FieldValue? AnswerOf(Guid record, CustomField field);
+  /// A new answer of the app's own type, on `record` (the kit sets its value).
+  FieldValue NewAnswer(Guid record, CustomField field);
+  /// Who made the latest change to a field on `record` — what a refusal names ("Someone" when the app keeps no history).
+  string LastChangedBy(Guid record);
+  /// A change was written — the place for a history line, or telling an automation.
+  void Changed(Guid record, CustomField field, string before, string after);
+}
+
+/// ONE KIND OF RECORD'S ANSWERS, said in two functions: which record an answer is on (`v => v.Guest`) and a new answer
+/// on a record (`g => new GuestFieldValue { Guest = g }`). An app derives one per kind of record and hands them to the
+/// constructor; the derived class is what `App.Implementations<IFieldRecords>()` finds.
+///
+/// ⚑ THE READS ARE ORDINARY QUERIES OVER THE APP'S OWN TYPES. `TValue.FirstOrDefault(…)` reads the app's value table
+///   (the compiler writes one copy of this class per use, with `TValue` as the app's type), and `recordOf(v)` inside it
+///   is put into the SQL in place of the call — `v.Guest.Id == @record` — so an answer is found with one statement,
+///   under the app's own rules on its value type.
+/// ⚑ No history and no events: `LastChangedBy` answers "Someone" and `Changed` does nothing. A record that keeps a
+///   history implements `IFieldRecords` itself.
+public class RecordFields<TField, TValue, TRecord> : IFieldRecords where TField : CustomField where TValue : FieldValue {
+  /// The record an answer is on — `v => v.Guest`.
+  public Func<TValue, TRecord> RecordOf;
+  /// A new answer on a record, of the app's own type — `g => new GuestFieldValue { Guest = g }`.
+  public Func<TRecord, TValue> AnswerOn;
+
+  public RecordFields(Func<TValue, TRecord> recordOf, Func<TRecord, TValue> answerOn) {
+    RecordOf = recordOf;
+    AnswerOn = answerOn;
+  }
+
+  public bool Holds(CustomField field) => field is TField;
+  public FieldValue? AnswerOf(Guid record, CustomField field) =>
+    TValue.FirstOrDefault(v => RecordOf(v).Id == record && v.Field == field);
+  public FieldValue NewAnswer(Guid record, CustomField field) {
+    var answer = AnswerOn(TRecord.Single(r => r.Id == record));
+    answer.Field = field;
+    return answer;
+  }
+  public string LastChangedBy(Guid record) => "Someone";
+  public void Changed(Guid record, CustomField field, string before, string after) { }
+}
+
+/// Answer, change or clear one field on one record, and keep it: checked first (`CheckedChange` — a retired field, an
+/// answer its kind cannot hold, and a colleague's change since `expected` are refused, each in a sentence), then written
+/// through the app's own value type (`IFieldRecords`). Nothing written when the answer is the same.
+public void SetField(Guid record, Guid fieldId, string value, string? expected = null) {
+  var field = CustomField.FirstOrDefault(f => f.Id == fieldId);
+  if (field == null) { throw new ValidationException("That field is gone. Reload the page."); }
+  var records = App.Implementations<IFieldRecords>().FirstOrDefault(r => r.Holds(field));
+  if (records == null) {
+    throw new ValidationException(field.Name + " is on no kind of record this app keeps answers for — it needs an IFieldRecords class.");
+  }
+  var row = records.AnswerOf(record, field);
+  var before = row == null ? "" : row.Value;
+  var after = CheckedChange(field, before, value, expected, records.LastChangedBy(record));
+  if (after == before) { return; }
+  if (row == null) { row = records.NewAnswer(record, field); }
+  row.Value = after;
+  records.Changed(record, field, before, after);
+  UnitOfWork.Commit();
+}
+
+// ── defining fields ─────────────────────────────────────────────────────────────────────────────────────────────────
+
+/// A field as the settings page's "Add a field" dialog fills it in, before there is one — handed to the app, which makes
+/// one of its own type with it (`FillField(new GuestField(), draft, position)`).
+public class FieldDraft {
+  public string Name = "";
+  public FieldKind Kind = FieldKind.Text;
+  public string Options = "";
+  public string Hint = "";
+  public bool Public = false;
+  public bool Required = false;
+}
+
+/// `field`, filled in from `draft`, at `position` — what an app's "add a field" action does with the dialog's draft.
+public CustomField FillField(CustomField field, FieldDraft draft, int position) {
+  field.Name = draft.Name.Trim();
+  field.Kind = draft.Kind;
+  field.Options = draft.Options;
+  field.Hint = draft.Hint;
+  field.Public = draft.Public;
+  field.Required = draft.Public && draft.Required;
+  field.Position = position;
+  return field;
+}
+
+/// A key no form holds yet — `word`, else `word-2`, `word-3`…
+public string FreeKey(string word, List<string> taken) {
+  if (!taken.Contains(word)) { return word; }
+  var n = 2;
+  while (taken.Contains(word + "-" + n)) { n = n + 1; }
+  return word + "-" + n;
+}
+
+/// What is wrong with `name` for a field among `siblings` (the fields of the same kind of record) — "" when nothing is.
+/// `self`: the field being renamed (`Guid.Empty` for one not made yet). A name is how a person and a filter tell fields
+/// apart, so two of one kind never share one, in any case — what the settings dialog says as a name is typed. The
+/// guarantee is the app's `[Unique(Name)]` on its field type; this catches a near twin ("Area", "area ") as well.
+public string FieldNameProblem(string name, Guid self, CustomField[] siblings) {
+  var n = name.Trim();
+  if (n == "") { return "Name the field."; }
+  if (siblings.Any(s => s.Id != self && SameAnswer(s.Name, n))) { return "Another field already has that name."; }
+  return "";
+}

@@ -1,0 +1,11 @@
+// The producer's test project for Osysharp.CustomFields — a photography studio's bookings, NOT a helpdesk on purpose: a client
+// books a shoot on a form whose questions depend on the kind of shoot (a wedding asks for the venue, a portrait whether
+// it is for a business), the studio's team keeps its own notes on a booking, and the studio keeps a few things about
+// each client (their preferred contact time, whether they are a returning client) that the client never sees.
+app FieldsKitTests {
+  model "model/**/*.osy";
+  tests "**/*.test.osy";
+  use Osysharp.Identity@0;
+  use Osysharp.CustomFields@0;
+  use Osysharp.Ui;
+}

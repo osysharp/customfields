@@ -1,0 +1,35 @@
+// Osysharp.CustomFields — fields an app's admins add to its records without a release: an order number on a request, the
+// industry of a company, the dietary needs of a guest. Text, numbers, yes or no, a choice, a date; required or not;
+// asked of the people outside the team or kept for the team; grouped on forms, each question shown on a condition.
+//
+// ⚑ THE APP SAYS WHICH RECORDS HAVE FIELDS, BY TYPE — a field type and a value type per record, the value carrying the
+//   reference to its record, so a value's security IS its record's:
+//
+//       entity GuestField : CustomField { security { allow read when IsStaff; allow create, update when IsAdmin; } }
+//       [Unique(Guest, Field)]
+//       entity GuestFieldValue : FieldValue {
+//         [Required] Guest Guest;
+//         security { allow read, create, update when IsStaff; }
+//       }
+//
+//   and one policy — who defines them: `policy ManagesFields => IsAdmin;`.
+//
+// ⚑ ONE RULE, BOTH SIDES: what a form shows, what is wrong with an answer and how it is kept are pure functions the page
+//   asks as a person types and the server asks again before anything is kept. A value's own invariants hold its kind on
+//   every write, whoever writes it.
+//
+// Docs: osy docs fields-kit.
+package Osysharp.CustomFields {
+  version "0.3.2";
+  minPlatform "0.9.0";
+  summary     "fields an app's admins add to its records without a release — text, numbers, yes or no, a choice, a date; required or optional; asked of outside people or kept for the team — on forms with conditions, every answer checked on the server and held to its kind on every write; each kind of record declares its own field and value types, so a value's security is its record's; with the question controls, the in-place editor for a record's fields, and the settings sections to define fields and forms.";
+  model "model/**/*.osy";
+  // An answer can be about a person: the app maps the level onto its own classification, or leaves it to each row's
+  // own security.
+  personal Content;
+  // The question controls, the editor and the settings sections — the Ui kit's controls and frame.
+  use Osysharp.Ui;
+  // A record's fields as columns in a report (`FieldsInReports`) — the platform's report compiler.
+  use Osysharp.Explore;
+  tests "tests";
+}
