@@ -33,7 +33,10 @@ component FieldsSettings() {
   live var bookingFields = BookingField.OrderBy(f => f.Position).ThenBy(f => f.Name).ToList();
   live var clientFields = ClientField.OrderBy(f => f.Position).ThenBy(f => f.Name).ToList();
   live var kinds = ShootKind.OrderBy(k => k.Position).ThenBy(k => k.Name).ToList();
-  live var onForms = FormField.Include(x => x.Form).Include(x => x.Field).Include(x => x.ShowWhen).OrderBy(x => x.Position).Take(500).ToList();
+  // Every field on every form, so one put on a form here (`FormSection`'s menu) is on it before Save — a windowed list
+  // takes new rows only from its re-read after the commit. A studio's fields on its few kinds of shoot are a handful.
+  [SuppressWarning("ui-page-query-without-a-take")]
+  live var onForms = FormField.Include(x => x.Form).Include(x => x.Field).Include(x => x.ShowWhen).OrderBy(x => x.Position).ToList();
   live var bookingUse = BookingFieldValue.Where(v => v.Value != "").GroupBy(v => v.Field.Id)
     .Select(g => new FieldUse { Field = g.Key, Count = g.Count() }).ToList();
   live var clientUse = ClientFieldValue.Where(v => v.Value != "").GroupBy(v => v.Field.Id)

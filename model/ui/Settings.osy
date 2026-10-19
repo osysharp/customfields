@@ -183,7 +183,9 @@ public component FieldListSection(CustomField[] fields, Func<FieldDraft, CustomF
 
 /// ONE FORM — its name, whether it is in use, what it is for, its key (chosen once: fixed when saved), whether it is the
 /// default, and the fields it asks, each moved, taken off, or shown on a condition. What the app adds to its own kind of
-/// form (a switch, a note) goes in the body (`{ … }`), under the key. `onForm`: this form's fields; `fields`: every
+/// form (a switch, a note) goes in the body (`{ … }`), under the key. `onForm`: this form's fields — filter it in memory
+/// from a page read of EVERY `FormField` (no `Where`, no `Take`), because a field put on here joins only such a list
+/// before Save; a windowed read shows it only after the commit; `fields`: every
 /// field of the kind it asks; `fresh`: made on this page and never saved; `makeDefault`: make it the default (the app
 /// unsets the others).
 [Composable]
