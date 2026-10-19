@@ -203,7 +203,8 @@ public List<string> OptionsIn(string options) {
 }
 
 /// Two answers that mean the same — "Mail" and "mail ".
-public bool SameAnswer(string a, string b) => a.Trim().ToLower() == b.Trim().ToLower();
+// Either may be null: an answer nobody has given yet is the empty answer.
+public bool SameAnswer(string? a, string? b) => (a ?? "").Trim().ToLower() == (b ?? "").Trim().ToLower();
 
 /// The answer given to `field`, or "".
 public string AnswerTo(List<FieldAnswer> answers, Guid field) {
@@ -477,8 +478,8 @@ public string FreeKey(string word, List<string> taken) {
 /// `self`: the field being renamed (`Guid.Empty` for one not made yet). A name is how a person and a filter tell fields
 /// apart, so two of one kind never share one, in any case — what the settings dialog says as a name is typed. The
 /// guarantee is the app's `[Unique(Name)]` on its field type; this catches a near twin ("Area", "area ") as well.
-public string FieldNameProblem(string name, Guid self, CustomField[] siblings) {
-  var n = name.Trim();
+public string FieldNameProblem(string? name, Guid self, CustomField[] siblings) {
+  var n = (name ?? "").Trim();     // a name nobody has typed yet is the empty name
   if (n == "") { return "Name the field."; }
   if (siblings.Any(s => s.Id != self && SameAnswer(s.Name, n))) { return "Another field already has that name."; }
   return "";

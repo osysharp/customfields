@@ -33,7 +33,7 @@ component FieldsSettings() {
   live var bookingFields = BookingField.OrderBy(f => f.Position).ThenBy(f => f.Name).ToList();
   live var clientFields = ClientField.OrderBy(f => f.Position).ThenBy(f => f.Name).ToList();
   live var kinds = ShootKind.OrderBy(k => k.Position).ThenBy(k => k.Name).ToList();
-  live var onForms = FormField.Include(x => x.Form).Include(x => x.Field).Include(x => x.ShowWhen).OrderBy(x => x.Position).ToList();
+  live var onForms = FormField.Include(x => x.Form).Include(x => x.Field).Include(x => x.ShowWhen).OrderBy(x => x.Position).Take(500).ToList();
   live var bookingUse = BookingFieldValue.Where(v => v.Value != "").GroupBy(v => v.Field.Id)
     .Select(g => new FieldUse { Field = g.Key, Count = g.Count() }).ToList();
   live var clientUse = ClientFieldValue.Where(v => v.Value != "").GroupBy(v => v.Field.Id)

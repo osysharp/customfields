@@ -111,7 +111,7 @@ public component FieldListSection(CustomField[] fields, Func<FieldDraft, CustomF
   render {
     SettingsSection(title, description: description != "" ? description
                       : "Every question asked about a " + record + ", in the order it shows them. A field is retired, never deleted: " + records + " keep their answers.") {
-      Stack(gap: 0, role: UiRole.List, label: title) {
+      Stack(gap: 0, role: (fields.Count == 0) ? UiRole.Group : UiRole.List, label: title) {
         if (fields.Count == 0) {
           Text("No fields yet. Add the first thing you want to know about a " + record + ".", color: Colors.TextMuted, fontSize: FontSize.Label);
         }
@@ -245,7 +245,7 @@ public component FormSection(FieldForm form, List<FormField> onForm, CustomField
         if (form.IsDefault) { Text("Default — taken when nobody chooses", fontSize: FontSize.Caption, color: Colors.TextMuted); }
         else { Button("Make it the default", onPress: makeDefault, tone: Tone.Ghost, size: Size.Sm, announceAs: "Make " + form.Name + " the default"); }
       }
-      Stack(gap: 0, role: UiRole.List, label: "Fields on " + form.Name) {
+      Stack(gap: 0, role: (onForm.Count == 0) ? UiRole.Group : UiRole.List, label: "Fields on " + form.Name) {
         if (onForm.Count == 0) {
           Text("It asks nothing more yet.", fontSize: FontSize.Label, color: Colors.TextMuted);
         }
