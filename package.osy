@@ -20,7 +20,7 @@
 //
 // Docs: osy docs fields-kit.
 package Osysharp.CustomFields {
-  version "0.4.0";
+  version "1.0.0";
   minPlatform "0.14.0";
   summary     "fields an app's admins add to its records without a release — text, numbers, yes or no, a choice, a date; required or optional; asked of outside people or kept for the team — on forms with conditions, every answer checked on the server and held to its kind on every write; each kind of record declares its own field and value types, so a value's security is its record's; with the question controls, the in-place editor for a record's fields, and the settings sections to define fields and forms.";
   model "model/**/*.osy";

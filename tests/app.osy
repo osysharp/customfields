@@ -6,6 +6,6 @@ app FieldsKitTests {
   model "model/**/*.osy";
   tests "**/*.test.osy";
   use Osysharp.Identity@0;
-  use Osysharp.CustomFields@0;
+  use Osysharp.CustomFields@1;
   use Osysharp.Ui;
 }

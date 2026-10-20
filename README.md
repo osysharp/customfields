@@ -10,7 +10,7 @@ before anything is kept. Each answer also holds its field's kind on every write,
 
 ```osy
 // app.osy
-use Osysharp.CustomFields@0;
+use Osysharp.CustomFields@1;
 ```
 
 ## Use it
