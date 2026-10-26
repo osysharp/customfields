@@ -144,3 +144,97 @@ a portrait asks whether it is for a business, and the company's name only when i
 booking, and the studio keeps a client's preferred contact time, which the client never sees. Every rule is checked on
 the server and on a direct write, and the settings page and the editor are driven as a person would use them, wide and
 on a phone.
+
+## Examples
+
+Taken from this package's own tests, which compile and run on every release.
+
+```osy
+using Osysharp.Identity;
+using Osysharp.CustomFields;
+using FieldsKitTests;
+
+[Test(Studio)]
+void a_question_on_a_condition_shows_only_once_the_earlier_answer_says_so() {
+  runas (Cleo) {
+    var portrait = FormSpecs().Where(x => x.Form == KindId("portrait")).ToList();
+    Assert.Equal(1, ShownFields(portrait, new List<FieldAnswer>(), true).Count);
+    Assert.Equal(1, ShownFields(portrait, [Said("For a business?", "no")], true).Count);
+    Assert.Equal(2, ShownFields(portrait, [Said("For a business?", "Yes")], true).Count);
+  }
+}
+```
+
+From [`tests/fields.test.osy`](tests/fields.test.osy).
+
+```osy
+using Osysharp.Identity;
+using Osysharp.CustomFields;
+using FieldsKitTests;
+
+[Test(Studio)]
+void every_kind_says_what_is_wrong_in_words_and_keeps_one_spelling() {
+  var guests = new FieldSpec { Name = "Guests", Kind = FieldKind.Number };
+  Assert.Equal("Guests takes a number, like 42 or 3.5.", AnswerProblem(guests, "forty"));
+  Assert.Equal("", AnswerProblem(guests, " 120 "));
+  Assert.Equal("120", Normalised(guests, " 120 "));
+  var on = new FieldSpec { Name = "Shoot on", Kind = FieldKind.Date };
+  Assert.Equal("Shoot on takes a date, like 2026-10-02.", AnswerProblem(on, "2026-02-30"));
+  Assert.Equal("2028-02-29", Normalised(on, "2028-02-29"));
+  Assert.Equal("29 Feb 2028", ShownAnswer(FieldKind.Date, "2028-02-29"));
+  var lens = new FieldSpec { Name = "Lens", Kind = FieldKind.Choice, Options = "35mm\n50mm\n85mm" };
+  Assert.Equal("Lens is one of: 35mm, 50mm, 85mm.", AnswerProblem(lens, "24mm"));
+  Assert.Equal("85mm", Normalised(lens, "85MM"));
+  var yes = new FieldSpec { Name = "Deposit paid", Kind = FieldKind.YesNo };
+  Assert.Equal("Deposit paid is yes or no.", AnswerProblem(yes, "maybe"));
+  Assert.Equal("yes", Normalised(yes, "Yes"));
+  Assert.Equal("order-number", FieldWord(" Order Number "));
+  // A field nobody answered says nothing about answers — an empty FirstOrDefault of a count is 0, not null.
+  Assert.Equal("", UseLine(new List<FieldUse>(), Guid.NewGuid(), "booking", "bookings"));
+  Assert.Equal(" · answered on 2 bookings", UseLine([new FieldUse { Field = Guid.Empty, Count = 2 }], Guid.Empty, "booking", "bookings"));
+}
+```
+
+From [`tests/fields.test.osy`](tests/fields.test.osy).
+
+```osy
+using Osysharp.Identity;
+using Osysharp.CustomFields;
+using FieldsKitTests;
+
+[Test(Studio)]
+void a_client_books_and_the_server_keeps_only_what_the_form_asks_them() {
+  runas (Cleo) {
+    var cleo = ClientId("Cleo Martin");
+    // A required question left empty is refused, naming it — and every problem is said at once.
+    var refused = Assert.Throws<ValidationException>(() => BookShoot(cleo, "Our wedding", KindId("wedding"), [Said("Guests", "lots")]));
+    Assert.Contains("Venue needs an answer.", refused.Message);
+    Assert.Contains("Guests takes a number", refused.Message);
+    // A team-only field is not the client's to answer, whatever the page sent.
+    Assert.Throws<ValidationException>(() => BookShoot(cleo, "Our wedding", KindId("wedding"), [Said("Venue", "The old mill"), Said("Deposit paid", "yes")]));
+    // A field from another form is refused too.
+    Assert.Throws<ValidationException>(() => BookShoot(cleo, "Our wedding", KindId("wedding"), [Said("Venue", "The old mill"), Said("For a business?", "no")]));
+    var id = BookShoot(cleo, "Our wedding", KindId("wedding"), [Said("Venue", " The old mill "), Said("Guests", "80"), Said("Shoot on", "2027-06-12")]);
+    Assert.Equal(3, BookingFieldValue.Count(v => v.Booking.Id == id));
+    Assert.Equal("The old mill", BookingFieldValue.Single(v => v.Booking.Id == id && v.Field.Name == "Venue").Value);
+  }
+  // A condition's hidden answer is dropped, not kept.
+  runas (Cleo) {
+    var id = BookShoot(ClientId("Cleo Martin"), "Headshots", KindId("portrait"), [Said("For a business?", "no"), Said("Company name", "Martin & Co")]);
+    Assert.Equal(1, BookingFieldValue.Count(v => v.Booking.Id == id));
+  }
+}
+```
+
+From [`tests/fields.test.osy`](tests/fields.test.osy).
+
+## Learn more
+
+- [The Osysharp.CustomFields reference](https://osysharp.com/reference/ui/fields-kit/)
+- [Osysharp.CustomFields in the package catalogue](https://osysharp.com/packages/#osysharp-customfields)
+- [The Osy# reference](https://osysharp.com/reference/) — the language, the runtime and every kit
+- [`llms-full.txt`](https://osysharp.com/llms-full.txt) — the whole reference and specification as one Markdown file, for a coding agent
+
+## Licence
+
+MIT — see [`LICENSE`](LICENSE).
